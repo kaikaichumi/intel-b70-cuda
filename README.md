@@ -3,17 +3,25 @@ English | [繁體中文](README.zh-TW.md)
 # b70-cuda
 
 **CUDA-style computing on the Intel Arc Pro B70 (Battlemage / Xe2).**
-Two layers: a PyTorch layer that lets CUDA-flavoured Python code run unchanged on the B70,
-and a source-level CUDA toolchain that compiles `.cu` code (including PyTorch CUDA extensions)
-for the B70 through SPIR-V and Level Zero.
-
-Makes the Intel Arc Pro B70 feel like a CUDA card. Two layers:
+Makes the B70 feel like a CUDA card for software that was written for NVIDIA and has no Intel version:
+a PyTorch layer that lets CUDA-flavoured Python code run unchanged, and a source-level CUDA toolchain
+that compiles `.cu` code (including PyTorch CUDA extensions) for the B70 through SPIR-V and Level Zero.
 
 | Layer | What it solves | Status |
 |---|---|---|
 | [PyTorch layer](pytorch-layer/README.md) (`b70` command) | AI tools written in Python/PyTorch: `"cuda"`, `.cuda()`, `torch.cuda.*` and `flash_attn` in the code run on the B70 without changes; `pip install` automatically filters out CUDA-only packages and swaps in Triton versions | Usable; self-tests 15/15, SDXL-Turbo, ComfyUI and Liger-Kernel verified in practice; flash_attn and sageattention replaced by an SDPA stand-in |
 | [CUDA toolchain](toolchain/README.md) (`b70cc`) | `.cu` programs with source code: compile them the same way as with nvcc and run them on the B70 | Usable; all 76 acceptance tests pass, 97% of the 61 HeCBench benchmarks compile with 0 wrong results, kernel time on par with the SYCL versions (geometric mean 0.89, see [roadmap](docs/03-roadmap.md)) |
 | [PyTorch CUDA extensions](pytorch-ext/README.md) | pip packages that ship `.cu` files (`CUDAExtension`) are compiled automatically by `b70 install` using `b70cc`; kernels read and write torch XPU tensors directly | Usable; causal-conv1d and mamba-ssm build with unmodified source code and pass the upstream tests |
+
+## What it is for, and what it is not
+
+| | Examples | Why |
+|---|---|---|
+| **Use it for** code written for NVIDIA that has no Intel build | pip packages that ship `.cu` kernels: **mamba-ssm**, **causal-conv1d** (both verified, upstream tests pass); Triton kernels such as **Liger-Kernel**; model repos and demos that hard-code `"cuda"`, `.cuda()`, `torch.cuda.*` or `import flash_attn` (**SDXL-Turbo**, **ComfyUI** verified); scientific `.cu` programs (61 HeCBench benchmarks); your own CUDA code | Without this they do not start at all on the B70. The toolchain compiles the CUDA source for Xe2; the PyTorch layer redirects the device names and supplies SDPA-based stand-ins for `flash_attn` and `sageattention` |
+| **Do not use it for** software that already has an XPU/Intel-native version | **vLLM** (`vllm-openai-xpu`), **PyTorch** itself, oneDNN/IPEX-based tools, Intel's own Triton-XPU kernels, OpenVINO | Those already drive the hardware directly (XMX matrix units, native SYCL kernels). A CUDA-to-SPIR-V translation in between can only be as fast at best, usually slower, and vLLM's CUDA kernels would not even compile (they need tensor-core `mma`, cutlass, inline PTX). Keep the native version |
+| **Cannot run** | packages whose kernels need tensor cores, cutlass, cuBLAS/cuDNN/cuFFT, inline PTX, cooperative groups or CUDA Graphs: **flash-attn 2**, **xformers**, **sageattention 2**, **TensorRT**, **cupy**, apex | chipStar does not support those features. `b70 install` drops these packages and, where one exists, puts a stand-in or an XPU alternative in their place (flash_attn and sageattention on SDPA, `onnxruntime-gpu` to `onnxruntime`) |
+
+Rule of thumb: if the project has an `xpu` build, use that. If it only has a CUDA build and the source is available, this project makes it run.
 
 ## How to use it in three minutes
 

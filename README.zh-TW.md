@@ -2,18 +2,25 @@
 
 # b70-cuda
 
-**CUDA-style computing on the Intel Arc Pro B70 (Battlemage / Xe2).**
-Two layers: a PyTorch layer that lets CUDA-flavoured Python code run unchanged on the B70,
-and a source-level CUDA toolchain that compiles `.cu` code (including PyTorch CUDA extensions)
-for the B70 through SPIR-V and Level Zero. Docs are in Traditional Chinese.
-
-讓 Intel Arc Pro B70 用起來像 CUDA 卡。分兩層：
+**在 Intel Arc Pro B70（Battlemage／Xe2）上做 CUDA 風格的運算。**
+讓 B70 對那些「只寫給 NVIDIA、沒有 Intel 版」的軟體用起來像 CUDA 卡：一層是 PyTorch 層，讓寫給 CUDA 的 Python 程式不改就能跑；
+一層是原始碼層級的 CUDA 工具鏈，把 `.cu` 程式碼（包含 PyTorch 的 CUDA 擴充套件）經 SPIR-V 與 Level Zero 編給 B70。
 
 | 層 | 解決什麼 | 狀態 |
 |---|---|---|
 | [PyTorch 層](pytorch-layer/README.zh-TW.md)（`b70` 指令） | Python／PyTorch 寫的 AI 工具：程式裡的 `"cuda"`、`.cuda()`、`torch.cuda.*`、`flash_attn` 不用改就能在 B70 上跑；`pip install` 自動濾掉 CUDA 專用套件、換成 Triton 版 | 可用；自我測試 15/15，SDXL-Turbo、ComfyUI、Liger-Kernel 實測通過；flash_attn、sageattention 由 SDPA 替身取代 |
 | [CUDA 工具鏈](toolchain/README.zh-TW.md)（`b70cc`） | 有原始碼的 `.cu` 程式：用跟 nvcc 一樣的方式編譯，在 B70 上執行 | 可用；驗收測試 76 項全過，HeCBench 61 個 benchmark 97% 編得過、0 個算錯，kernel 時間與 SYCL 版相當（幾何平均 0.89，見[路線圖](docs/03-roadmap.zh-TW.md)） |
 | [PyTorch CUDA 擴充](pytorch-ext/README.zh-TW.md) | 帶 `.cu` 的 pip 套件（`CUDAExtension`）由 `b70 install` 自動用 `b70cc` 編譯，kernel 直接讀寫 torch XPU 張量 | 可用；causal-conv1d、mamba-ssm 原始碼不改，上游測試通過 |
+
+## 適合用在哪、不適合用在哪
+
+| | 例子 | 原因 |
+|---|---|---|
+| **適合**：寫給 NVIDIA、沒有 Intel 版的程式 | 帶 `.cu` kernel 的 pip 套件：**mamba-ssm**、**causal-conv1d**（都實測過，上游測試通過）；Triton kernel 如 **Liger-Kernel**；把 `"cuda"`、`.cuda()`、`torch.cuda.*`、`import flash_attn` 寫死的模型 repo 與 demo（**SDXL-Turbo**、**ComfyUI** 實測）；科學計算的 `.cu` 程式（HeCBench 61 個）；你自己寫的 CUDA 程式 | 沒有這個它們在 B70 上根本起不來。工具鏈把 CUDA 原始碼編給 Xe2；PyTorch 層轉導裝置名稱，並提供 `flash_attn`、`sageattention` 的 SDPA 替身 |
+| **不適合**：已經有 XPU／Intel 原生版的軟體 | **vLLM**（`vllm-openai-xpu`）、**PyTorch** 本身、oneDNN／IPEX 的工具、Intel 自己的 Triton-XPU kernel、OpenVINO | 它們已經直接驅動硬體（XMX 矩陣單元、原生 SYCL kernel）。中間再加一層 CUDA→SPIR-V 轉換最好也只是一樣快，通常更慢；而且 vLLM 的 CUDA kernel 根本編不過（要 tensor core 的 `mma`、cutlass、inline PTX）。請用原生版 |
+| **跑不了** | kernel 用到 tensor core、cutlass、cuBLAS／cuDNN／cuFFT、inline PTX、cooperative groups 或 CUDA Graphs 的套件：**flash-attn 2**、**xformers**、**sageattention 2**、**TensorRT**、**cupy**、apex | chipStar 不支援這些功能。`b70 install` 會把這些套件丟掉，有替代的就換上（flash_attn、sageattention 換成 SDPA 替身，`onnxruntime-gpu` 換成 `onnxruntime`） |
+
+判斷原則：專案有 `xpu` 版就用它；只有 CUDA 版但有原始碼，這個專案讓它跑起來。
 
 ## 三分鐘看懂怎麼用
 
