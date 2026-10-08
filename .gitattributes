@@ -1,0 +1,3 @@
+# Linux-targeted repo: keep LF everywhere (shell scripts, patches) even on Windows checkouts
+* text=auto eol=lf
+*.png binary

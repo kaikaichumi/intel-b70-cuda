@@ -9,8 +9,8 @@ for the B70 through SPIR-V and Level Zero. Docs are in Traditional Chinese.
 
 | 層 | 解決什麼 | 狀態 |
 |---|---|---|
-| [PyTorch 層](pytorch-layer/)（`b70` 指令） | Python／PyTorch 寫的 AI 工具：程式裡的 `"cuda"`、`.cuda()`、`torch.cuda.*`、`flash_attn` 不用改就能在 B70 上跑；`pip install` 自動濾掉 CUDA 專用套件、換成 Triton 版 | 可用；自我測試 14/14，SDXL-Turbo、ComfyUI、Liger-Kernel、sageattention（Triton 版）實測通過 |
-| [CUDA 工具鏈](toolchain/)（`b70cc`） | 有原始碼的 `.cu` 程式：用跟 nvcc 一樣的方式編譯，在 B70 上執行 | 可用；驗收測試 76 項全過，HeCBench 61 個 benchmark 97% 編得過、0 個算錯，kernel 效能與 SYCL 版相當（見[路線圖](docs/03-roadmap.md)） |
+| [PyTorch 層](pytorch-layer/)（`b70` 指令） | Python／PyTorch 寫的 AI 工具：程式裡的 `"cuda"`、`.cuda()`、`torch.cuda.*`、`flash_attn` 不用改就能在 B70 上跑；`pip install` 自動濾掉 CUDA 專用套件、換成 Triton 版 | 可用；自我測試 15/15，SDXL-Turbo、ComfyUI、Liger-Kernel 實測通過；flash_attn、sageattention 由 SDPA 替身取代 |
+| [CUDA 工具鏈](toolchain/)（`b70cc`） | 有原始碼的 `.cu` 程式：用跟 nvcc 一樣的方式編譯，在 B70 上執行 | 可用；驗收測試 76 項全過，HeCBench 61 個 benchmark 97% 編得過、0 個算錯，kernel 時間與 SYCL 版相當（幾何平均 0.89，見[路線圖](docs/03-roadmap.md)） |
 | [PyTorch CUDA 擴充](pytorch-ext/) | 帶 `.cu` 的 pip 套件（`CUDAExtension`）由 `b70 install` 自動用 `b70cc` 編譯，kernel 直接讀寫 torch XPU 張量 | 可用；causal-conv1d、mamba-ssm 原始碼不改，上游測試通過 |
 
 ## 三分鐘看懂怎麼用

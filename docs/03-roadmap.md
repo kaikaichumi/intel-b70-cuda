@@ -31,7 +31,7 @@ IGC 把 SPIR-V 編成 Xe2 指令 → B70
 | **M0** 專案骨架 | 專案資料夾、文件、拿掉個人資訊 | 可直接 `git init` 推上 GitHub | 完成 |
 | **M1** 工具鏈上線 | chipStar 工具鏈在 B70 上可用；`b70cc` 編譯入口；硬體與驅動調查（[02](02-b70-hardware-driver.md)） | ① chipStar 單元測試在 B70（Level Zero）上的通過率，跟它對 Intel GPU 的已知失敗清單一致<br>② 標準 CUDA 範例（vectorAdd、matmul、reduction、scan、transpose、histogram 等）不改原始碼，用 `b70cc` 編譯後算出正確結果<br>③ kernel 裡 `warpSize == 32` | ②③ 通過（`tests/run_cuda_tests.sh`：13 個程式、76 項檢查全過，含 CUB block 原語、動態共享記憶體、快速內建函式）；① 待跑 |
 | **M2** 正確性 | 跑 HeCBench 的 CUDA 版本 | ① 挑 50 個以上的 benchmark，八成以上編得過、結果驗證正確<br>② 每個失敗都分類（缺 API、缺 device 函式、驅動問題、效能逾時）並記錄 | ① 61 個：97% 編得過、85% 跑完；有自我檢查的全部通過；② 已分類（見下） |
-| **M3** 效能 | 微基準和應用基準 | ① HeCBench：同一個 benchmark 的 CUDA 版（b70cc）對 SYCL 版（icpx），幾何平均 ≥ 0.8 倍<br>② 記憶體頻寬（類 STREAM 的複製、三元組運算）≥ 同一張卡上 SYCL 實測值的 90%<br>③ kernel 啟動延遲：量測並跟 SYCL 比較，記錄差距<br>④ 每一項優化都記錄改動前後的數字 | ① **0.88 倍**（30 個雙邊驗證通過的 benchmark）；② 通過（約 100%）；③ CUDA 1.95 µs 對 SYCL 2.33 µs |
+| **M3** 效能 | 微基準和應用基準 | ① HeCBench：同一個 benchmark 的 CUDA 版（b70cc）對 SYCL 版（icpx），幾何平均 ≥ 0.8 倍<br>② 記憶體頻寬（類 STREAM 的複製、三元組運算）≥ 同一張卡上 SYCL 實測值的 90%<br>③ kernel 啟動延遲：量測並跟 SYCL 比較，記錄差距<br>④ 每一項優化都記錄改動前後的數字 | ① 牆上時間 **0.88 倍**（34 個），kernel 時間 **0.89 倍**（32 個，見「M3 第二輪」；牆上時間的差距多半是 icpx 預設 fast-math 的 CPU 端）；② 通過（約 100%）；③ CUDA 1.95 µs 對 SYCL 2.33 µs；④ 優化 1（事件）、優化 2（數學旗標）都有前後數字 |
 | **M4** PyTorch CUDA 擴充 | `b70 install` 遇到帶 `.cu` 的套件時改用 `b70cc` 編譯；擴充 kernel 直接讀寫 torch XPU 張量（共用 Level Zero context，不複製）。三個難點見下方「M4 的實際工作」 | ① 自寫的範例擴充（`CUDAExtension` 寫法、用 `ATen/cuda` 標頭）在 XPU 張量上算出跟 CPU 一樣的結果<br>② 至少一個真實的開源 CUDA 擴充套件裝起來並通過它自己的測試<br>③ 有 Triton 版本的套件由 `b70 install` 自動改用 Triton 版 | ① 通過（6／6）；② 通過（causal-conv1d 1.7.0 與 mamba-ssm 2.2.5 原始碼不改、裝起來、通過正確性檢查，見下方紀錄）；③ 通過（Liger-Kernel 直接跑；sageattention 自動換成 Triton 版；`test_triton*.py`） |
 | **M5** 擴大支援 | `_sync` warp 函式、float atomic（B70 硬體支援）、tensor core 對應 XMX、cuBLAS→oneMKL | 依 M2–M4 找到的缺口排序，逐項加測試 | |
 
@@ -353,9 +353,36 @@ icpx 要同時靠預設的 fast-math（允許 `min` 歸約重排）和它自己�
 
 試過沒差的：`-fgpu-flush-denormals-to-zero` 單獨看不出時間差（仍保留，對應 nvcc 語意）。
 
-### 3. kernel 時間比較（`tests/hecbench/kernel_times.sh`，34 個雙邊驗證通過的 benchmark）
+### 3. kernel 時間比較（`tests/hecbench/kernel_times.sh`，2026-10-09，`tests/hecbench/kernel-times-2026-10-09.txt`）
 
-（執行中，結果補在這裡）
+34 個雙邊驗證通過的 benchmark（`list-verified.txt`），CUDA 版用現在的工具鏈（含 `-fno-math-errno`、補丁 0004）重編，
+每支跑兩次取第二次，只比程式自己印的 kernel 時間。heat2d、nbody 只印頻寬／速率不印時間，略過；其餘 32 個：
+
+**幾何平均 SYCL／CUDA kernel 時間 = 0.89**（CUDA 版慢 11%）。第一輪認定慢的三個全部消失：tsa 1.00、hausdorff 0.99、bitonic-sort 0.98。
+
+| 最慢的五個 | CUDA | SYCL | 比值 | | 最快的五個 | CUDA | SYCL | 比值 |
+|---|---|---|---|---|---|---|---|---|
+| adam | 0.213 ms | 0.081 ms | 0.38 | | iso2dfd | 3.12 s | 5.52 s | 1.77 |
+| fdtd3d | 0.332 ms | 0.188 ms | 0.57 | | gaussian | 0.97 s | 1.04 s | 1.07 |
+| bilateral | 10.0 ms | 6.6 ms | 0.66 | | nlll | 0.079 ms | 0.084 ms | 1.06 |
+| laplace | 1.81 s | 1.27 s | 0.70 | | lombscargle | 0.535 ms | 0.559 ms | 1.05 |
+| jacobi | 881 ms | 630 ms | 0.72 | | all-pairs-distance | 23.5 ms | 24.4 ms | 1.04 |
+
+中間 22 個在 0.72～1.01 之間，其中 17 個在 0.95～1.01。
+
+**adam 0.38 的原因**（又是 fast-math，但這次在 GPU 端）：kernel 每個時間步算兩次 `powf(beta, t)`，SYCL 版因為 icpx 預設 `-fp-model=fast`
+用了近似版 `pow`；CUDA 版的 Makefile 把 `--use_fast_math` 註解掉了，所以是精確版（nvcc 也會是精確版）。對照（GPU 閒置時重量）：
+
+| | 精確 | fast-math |
+|---|---|---|
+| CUDA（b70cc） | 0.152 ms | **0.116 ms**（`--use_fast_math`，靠 b70cc 新的旗標展開） |
+| SYCL（icpx） | 0.833 ms（`-fp-model=precise`） | 0.081 ms（預設） |
+
+同樣是精確版，b70cc 版比 SYCL 版快 5 倍；同樣是 fast-math 差 1.4 倍（可能是 `pow` 的 `-fapprox-func` 展開跟 icpx 不同，待查）。
+結論：M3 ① 的比較基準本身偏向 SYCL（它預設 fast-math），實際的 kernel 效能相當。
+
+**還真的慢的**（下一輪目標）：fdtd3d 0.57（stencil、共享記憶體，`--use_fast_math` 沒有幫助：0.367 ms）、bilateral 0.66、laplace 0.70、jacobi 0.72。
+這幾個要看 IGC 產生的程式碼（暫存器、SIMD 寬度、共享記憶體存取方式）跟 SYCL 版的差異。
 
 ## 測試與效能的做法
 

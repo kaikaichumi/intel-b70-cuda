@@ -32,7 +32,7 @@ echo 'B70_DATA=/mnt/bigdisk/b70' >> ~/.config/b70/config
 
 ```bash
 b70 build          # 建 b70-ai 映像檔：以 vllm/vllm-openai-xpu 的 torch 2.13+xpu 為底，加上轉接層與常用套件（約 10 分鐘）
-b70 test           # 自我測試：14 項，vLLM 開著也能跑
+b70 test           # 自我測試：15 項，vLLM 開著也能跑
 ```
 
 ### CUDA 工具鏈（編 .cu 原始碼、PyTorch CUDA 擴充）

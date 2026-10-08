@@ -1,0 +1,39 @@
+benchmark               CUDA(b70cc)   SYCL(icpx) SYCL/CUDA
+adam                       0.213 ms     0.081 ms     0.38
+fdtd3d                     0.332 ms     0.188 ms     0.57
+bilateral                 10.036 ms     6.605 ms     0.66
+laplace                     1.809 s      1.268 s     0.70
+jacobi                   881.141 ms   630.188 ms     0.72
+present                    0.242 ms     0.174 ms     0.72
+nqueen                   181.179 ms   139.371 ms     0.77
+pnpoly                   227.721 ms   177.060 ms     0.78
+scan                     341.016 ms   274.558 ms     0.81
+colorwheel                 0.802 ms     0.651 ms     0.81
+radixsort                  1.965 ms     1.755 ms     0.89
+vanGenuchten               8.670 ms     8.221 ms     0.95
+dct8x8                     2.048 ms     1.942 ms     0.95
+perplexity                 6.947 ms     6.649 ms     0.96
+haccmk                     1.281 ms     1.239 ms     0.97
+nw                        18.688 ms    18.188 ms     0.97
+floydwarshall              5.629 ms     5.499 ms     0.98
+convolutionSeparable       2.001 ms     1.959 ms     0.98
+bitonic-sort             121.651 ms   119.645 ms     0.98
+minisweep                  11.745 s     11.555 s     0.98
+matrix-rotate              4.268 ms     4.207 ms     0.99
+jenkins-hash               2.103 ms     2.076 ms     0.99
+hausdorff                 21.669 ms    21.405 ms     0.99
+chi2                       18.351 s     18.216 s     0.99
+stddev                    28.878 ms    28.806 ms     1.00
+tsa                        0.407 ms     0.408 ms     1.00
+entropy                   38.871 ms    39.252 ms     1.01
+all-pairs-distance        23.494 ms    24.427 ms     1.04
+lombscargle                0.535 ms     0.559 ms     1.05
+nlll                       0.079 ms     0.084 ms     1.06
+gaussian                 970.918 ms      1.039 s     1.07
+iso2dfd                     3.116 s      5.517 s     1.77
+
+32 benchmarks; geomean SYCL/CUDA kernel time = 0.89 (b70cc build slower)
+slowest CUDA relative to SYCL: adam 0.38, fdtd3d 0.57, bilateral 0.66, laplace 0.70, jacobi 0.72
+fastest CUDA relative to SYCL: all-pairs-distance 1.04, lombscargle 1.05, nlll 1.06, gaussian 1.07, iso2dfd 1.77
+skipped heat2d: no time line (cuda 0, sycl 0)
+skipped nbody: no time line (cuda 0, sycl 0)
