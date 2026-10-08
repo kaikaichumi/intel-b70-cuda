@@ -1,0 +1,52 @@
+#!/bin/bash
+# b70cc — nvcc-compatible compiler driver for the Arc Pro B70.
+# Runs inside the b70cuda environment (b70cuda cc / b70cuda shell), where
+# B70_CUDA_INSTALL points at the chipStar install this wraps.
+set -euo pipefail
+INSTALL=${B70_CUDA_INSTALL:?run b70cc through b70cuda (b70cuda cc ... / b70cuda shell)}
+# CMake identifies CUDA compilers by this banner (see chipStar docs/Using.md).
+export CUCC_VERSION_STRING=${CUCC_VERSION_STRING:-"nvcc: NVIDIA (R) Cuda compiler driver"}
+# CUB and thrust::complex come from the toolchain's own headers (over hipCUB);
+# b70/cuda_compat.h adds runtime API chipStar leaves out (cudaFuncSetAttribute).
+INC="$(dirname "$(readlink -f "$0")")/../include"
+
+# Device code never sets errno (that is nvcc's semantics too).  Without this, clang
+# keeps expf/sqrtf/... as libm-style calls and IGC cannot use its own hardware-tuned
+# versions: the precise transcendental functions measured 3x slower (bench/fast_math.cu).
+DEV=(-Xarch_device -fno-math-errno)
+
+# nvcc --use_fast_math: approximate transcendentals (expf -> __expf etc.), approximate
+# division and square root, FMA contraction, flush denormals to zero.  cucc silently
+# ignores the flag and hipcc turns -ffast-math into just -DCHIP_FAST_MATH, so neither
+# reaches the device compiler; this spells them out.
+FAST_DEV=(-DCHIP_FAST_MATH -D__USE_FAST_MATH__
+          -Xarch_device -fapprox-func -Xarch_device -freciprocal-math
+          -Xarch_device -ffp-contract=fast -Xarch_device -fgpu-flush-denormals-to-zero)
+# -ffast-math (clang spelling, also via -Xcompiler) means "everything" on both sides.
+# hipcc drops the literal flag anywhere on the line, so it is expanded into its parts.
+FAST_ALL=(-Xarch_device -funsafe-math-optimizations -Xarch_device -ffinite-math-only
+          -Xarch_device -fno-signed-zeros
+          -Xarch_host -fno-math-errno -Xarch_host -funsafe-math-optimizations
+          -Xarch_host -ffinite-math-only -Xarch_host -fno-signed-zeros
+          -Xarch_host -fapprox-func -Xarch_host -freciprocal-math
+          -Xarch_host -ffp-contract=fast)
+
+args=(); compiling=no; fast=no; fastall=no
+for a in "$@"; do
+    case "$a" in
+        *.cu|*.cuh|*.cpp|*.cc|*.cxx|*.c|*.C|-c|-E|-M|-MM|-x|-x=*) compiling=yes ;;
+    esac
+    case "$a" in
+        --use_fast_math|-use_fast_math) fast=yes; continue ;;
+        -ffast-math|-Xcompiler=-ffast-math) fast=yes; fastall=yes; continue ;;
+    esac
+    args+=("$a")
+done
+
+extra=()
+if [ "$compiling" = yes ]; then   # -Xarch_* on a link-only line only draws an "unused" warning
+    extra+=("${DEV[@]}")
+    [ "$fast" = yes ] && extra+=("${FAST_DEV[@]}")
+    [ "$fastall" = yes ] && extra+=("${FAST_ALL[@]}")
+fi
+exec "$INSTALL/bin/cucc" -I"$INC" -include "$INC/b70/cuda_compat.h" "${extra[@]}" "${args[@]}"

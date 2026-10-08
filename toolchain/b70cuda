@@ -1,0 +1,170 @@
+#!/bin/bash
+# b70cuda — source-level CUDA toolchain for the Intel Arc Pro B70.
+#
+#   b70cuda setup            fetch LLVM 22 (chipStar-patched) and the chipStar sources;
+#                            the dev image (Dockerfile.dev) is built on first use
+#   b70cuda image            (re)build the b70-cuda-dev image
+#   b70cuda build            configure + build + install chipStar into $B70_CUDA_HOME/install,
+#                            then the header-only libraries (rocPRIM, hipCUB) — `b70cuda libs` alone redoes those
+#   b70cuda cc ARGS...       compile like nvcc (this is what the `b70cc` link calls)
+#   b70cuda run CMD...       run a command with the toolchain and the B70 visible
+#   b70cuda shell            interactive shell in the toolchain environment
+#   b70cuda test             tests/run_cuda_tests.sh with b70cc
+#
+# Everything runs inside the Intel oneAPI devel image, so the host needs only
+# Docker and the xe kernel driver. Settings come from ~/.config/b70/config
+# (same file as the `b70` command): B70_DATA, B70_GPU_PCI, B70_CUDA_HOME.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+REPO=$(dirname "$HERE")
+CONF=${B70_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/b70/config}
+if [ -f "$CONF" ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in B70_*) [ -z "${!k:-}" ] && export "$k=$v" ;; esac
+    done < <(grep -E '^B70_[A-Z_]+=' "$CONF")
+fi
+DATA=${B70_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/b70}
+CUDA_HOME_B70=${B70_CUDA_HOME:-$DATA/cuda}
+DEV_IMAGE=${B70_CUDA_IMAGE:-b70-cuda-dev:latest}
+CHIPSTAR_IMAGE=${B70_CHIPSTAR_IMAGE:-pveleskopglc/chipstar:latest}
+CHIPSTAR_COMMIT=${B70_CHIPSTAR_COMMIT:-092b55c886dcd25145e0ba5882693ef03b76140a}
+LLVM=$CUDA_HOME_B70/llvm-22
+SRC=$CUDA_HOME_B70/chipStar-src
+BUILD=$CUDA_HOME_B70/build
+INSTALL=$CUDA_HOME_B70/install
+
+die() { echo "b70cuda: $*" >&2; exit 1; }
+
+detect_gpu() {
+    local r dev
+    for r in /sys/class/drm/renderD*; do
+        dev=$(readlink -f "$r/device")
+        [ "$(basename "$(readlink -f "$dev/driver")")" = xe ] && { basename "$dev"; return 0; }
+    done
+    return 1
+}
+
+ensure_image() {
+    docker image inspect "$DEV_IMAGE" >/dev/null 2>&1 ||
+        docker build -t "$DEV_IMAGE" -f "$HERE/Dockerfile.dev" "$HERE" >&2
+}
+
+in_container() {  # in_container [-it] CMD...
+    local tty=() pci render
+    ensure_image
+    if [ "${1:-}" = -it ]; then tty=(-it); shift; fi
+    pci=${B70_GPU_PCI:-$(detect_gpu)} || die "no Intel GPU on the xe driver found (set B70_GPU_PCI)"
+    render=$(readlink -f "/dev/dri/by-path/pci-$pci-render")
+    mkdir -p "$DATA/home" "$DATA/cache/neo"
+    local mounts=(-v "$HOME:$HOME" -v "$DATA:$DATA")
+    case "$PWD/" in "$HOME"/*|"$DATA"/*) ;; *) mounts+=(-v "$PWD:$PWD") ;; esac
+    case "$CUDA_HOME_B70/" in "$DATA"/*) ;; *) mounts+=(-v "$CUDA_HOME_B70:$CUDA_HOME_B70") ;; esac
+    docker run --rm -i "${tty[@]}" --init \
+        --device "$render" --group-add "$(getent group render | cut -d: -f3)" \
+        --user "$(id -u):$(id -g)" --network host --ipc=host \
+        "${mounts[@]}" -w "$PWD" \
+        -e HOME="$DATA/home" -e TERM \
+        -e NEO_CACHE_PERSISTENT=1 -e NEO_CACHE_DIR="$DATA/cache/neo" \
+        -e CHIP_BE="${CHIP_BE:-level0}" -e CHIP_DEVICE_TYPE=gpu \
+        -e CHIP_LOGLEVEL="${CHIP_LOGLEVEL:-err}" -e CHIP_MODULE_CACHE_DIR="$DATA/cache/chipstar" \
+        -e B70_PATH_PREPEND="$HERE/bin:$INSTALL/bin"         -e B70_LD_PREPEND="$INSTALL/lib:$LLVM/lib/x86_64-unknown-linux-gnu" \
+        -e B70_CUDA_INSTALL="$INSTALL" \
+        "$DEV_IMAGE" bash -c '
+            # prepend, never replace: the image sets up the oneAPI paths (UMF, TBB, ...)
+            export PATH="$B70_PATH_PREPEND:$PATH"
+            export LD_LIBRARY_PATH="$B70_LD_PREPEND${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            exec "$@"' b70cuda "$@"
+}
+
+cmd_setup() {
+    mkdir -p "$CUDA_HOME_B70"
+    [ -x "$LLVM/bin/clang" ] && [ -d "$SRC/.git" ] && { echo "already set up in $CUDA_HOME_B70"; return; }
+    local crane=$DATA/tools/crane tmp=$CUDA_HOME_B70/.extract
+    if [ ! -x "$crane" ]; then
+        mkdir -p "$DATA/tools"
+        curl -sSL https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz |
+            tar -xz -C "$DATA/tools" crane
+    fi
+    # Stream the prebuilt chipStar image straight to disk (no docker pull, nothing on the
+    # root filesystem) and keep only its chipStar-patched LLVM and the chipStar checkout.
+    mkdir -p "$tmp"
+    echo "extracting LLVM 22 + chipStar sources from $CHIPSTAR_IMAGE (~5 GB download)"
+    "$crane" export "$CHIPSTAR_IMAGE" - | tar -x -C "$tmp" --wildcards 'apps/llvm/*' 'home/chipStarUser/chipStar/*'
+    mv "$tmp/apps/llvm/22.0-native" "$LLVM"
+    mv "$tmp/home/chipStarUser/chipStar" "$SRC"
+    rm -rf "$SRC/build" "$tmp"
+    # pin the chipStar revision the patches and measurements are made against
+    if [ "$(git -C "$SRC" rev-parse HEAD)" != "$CHIPSTAR_COMMIT" ]; then
+        git -C "$SRC" fetch --depth 1 origin "$CHIPSTAR_COMMIT"
+        git -C "$SRC" checkout -q "$CHIPSTAR_COMMIT"
+        git -C "$SRC" submodule update --init --recursive
+    fi
+}
+
+apply_patches() {  # our fixes on top of chipStar (toolchain/patches/*.patch)
+    local p
+    for p in "$HERE"/patches/*.patch; do
+        [ -e "$p" ] || continue
+        if git -C "$SRC" apply --reverse --check "$p" 2>/dev/null; then
+            continue  # already applied
+        fi
+        git -C "$SRC" apply "$p" || die "$(basename "$p") does not apply to $SRC"
+        echo "applied $(basename "$p")"
+    done
+}
+
+cmd_build() {
+    [ -x "$LLVM/bin/llvm-config" ] || die "run 'b70cuda setup' first"
+    apply_patches
+    in_container bash -c "
+set -e
+cmake -S '$SRC' -B '$BUILD' -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DLLVM_CONFIG_BIN='$LLVM/bin/llvm-config' -DCMAKE_INSTALL_PREFIX='$INSTALL' \
+    -DCHIP_BUILD_SAMPLES=OFF -DCHIP_BUILD_TESTS=ON ${B70_CUDA_CMAKE_ARGS:-}
+cmake --build '$BUILD' -j\$(nproc)
+cmake --install '$BUILD'
+"
+}
+
+# Header-only HIP libraries that CUDA extensions need (CUB/Thrust-style
+# primitives), from the chipStar branches of the ROCm repositories.
+cmd_libs() {
+    [ -x "$INSTALL/bin/hipcc" ] || die "run 'b70cuda build' first"
+    # Header-only, so once installed they never need a rebuild; `b70cuda libs force`
+    # redoes them (rocPRIM's cmake re-configure in an old build dir cannot find the
+    # rocm-cmake it fetched the first time).
+    if [ "${1:-}" != force ] && [ -e "$INSTALL/include/hipcub/hipcub.hpp" ] && [ -e "$INSTALL/include/rocprim/rocprim.hpp" ]; then
+        echo "rocPRIM + hipCUB already installed in $INSTALL/include (b70cuda libs force to redo)"
+        return 0
+    fi
+    rm -rf "$CUDA_HOME_B70/build-rocprim" "$CUDA_HOME_B70/build-hipcub"
+    local r
+    for r in rocPRIM hipCUB; do
+        [ -d "$CUDA_HOME_B70/$r" ] ||
+            git clone -q --depth 1 --branch chipStar "https://github.com/CHIP-SPV/$r.git" "$CUDA_HOME_B70/$r"
+    done
+    in_container bash -c "
+set -e
+export HIP_PLATFORM=spirv
+common='-G Ninja -DCMAKE_CXX_COMPILER=$INSTALL/bin/hipcc -DCMAKE_INSTALL_PREFIX=$INSTALL -DCMAKE_PREFIX_PATH=$INSTALL
+        -DBUILD_TEST=OFF -DBUILD_BENCHMARK=OFF -DBUILD_EXAMPLE=OFF -DBUILD_FILE_REORG_BACKWARD_COMPATIBILITY=OFF'
+cmake -S '$CUDA_HOME_B70/rocPRIM' -B '$CUDA_HOME_B70/build-rocprim' \$common -DONLY_INSTALL=ON
+cmake --build '$CUDA_HOME_B70/build-rocprim' && cmake --install '$CUDA_HOME_B70/build-rocprim'
+cmake -S '$CUDA_HOME_B70/hipCUB' -B '$CUDA_HOME_B70/build-hipcub' \$common
+cmake --build '$CUDA_HOME_B70/build-hipcub' && cmake --install '$CUDA_HOME_B70/build-hipcub'
+echo 'rocPRIM + hipCUB installed into $INSTALL/include'
+"
+}
+
+case "${1:-help}" in
+    setup) cmd_setup ;;
+    image) docker build -t "$DEV_IMAGE" -f "$HERE/Dockerfile.dev" "$HERE" ;;
+    build) cmd_build; cmd_libs ;;
+    libs) shift; cmd_libs "$@" ;;
+    cc) shift; in_container b70cc "$@" ;;
+    run) shift; in_container "$@" ;;
+    shell) in_container -it bash ;;
+    test) shift; in_container "$REPO/tests/run_cuda_tests.sh" b70cc "$@" ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

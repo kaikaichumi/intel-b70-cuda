@@ -1,0 +1,367 @@
+b70-cuda: make hipEventRecord / cudaEventRecord cheap on the Level Zero backend
+
+Measured on an Arc Pro B70 (Xe2), compute-runtime 26.05:
+  cudaEventRecord, idle GPU      480 us -> 9 us
+  kernel + record per iteration  292 us -> 28 us (kernel alone: 22 us)
+
+1. The recorded device timestamp is copied by the GPU into the event object.
+   Into ordinary pageable host memory that 8-byte copy costs ~300 us; into USM
+   host memory ~10 us. Timestamps now live in slots carved from USM host slabs.
+2. Each re-record of a user event created a fresh single-slot event pool
+   (issue #1258 workaround), ~300 us per zeEventPoolCreate. Retired slots that
+   have already signaled are exactly as unreferenced as the ones the reaper
+   destroys, so up to 8 are kept as spares and recycled with a host reset.
+3. The host timestamp only orders two events in getElapsedTime(); use a host
+   monotonic clock instead of a zeDeviceGetGlobalTimestamps call (~15 us).
+
+Applies to chipStar 092b55c886dcd25145e0ba5882693ef03b76140a.
+
+diff --git a/src/CHIPBackend.hh b/src/CHIPBackend.hh
+index c66ac3e9..666add9d 100644
+--- a/src/CHIPBackend.hh
++++ b/src/CHIPBackend.hh
+@@ -752,6 +752,10 @@ protected:
+   Event() : TrackCalled_(false), UserEvent_(false) {}
+ 
+ public:
++  /// False for events that wrap a handle owned by somebody else
++  /// (hipGetHipEventFromNativeEvent); such events are waited on directly.
++  virtual bool ownsHandle() const { return true; }
++
+   // Public so hipEventDestroy can delete through chipstar::Event* and reach this
+   // virtual destructor (see hipEventDestroy).
+   virtual ~Event() { logTrace("~Event() {}", (void *)this); };
+diff --git a/src/CHIPBindings.cc b/src/CHIPBindings.cc
+index 7e5fb432..fc62e5ba 100755
+--- a/src/CHIPBindings.cc
++++ b/src/CHIPBindings.cc
+@@ -3894,6 +3894,15 @@ hipError_t hipStreamWaitEventInternal(hipStream_t Stream, hipEvent_t Event,
+   if (ChipEvent->isFinished())
+     RETURN(hipSuccess);
+ 
++  // An event wrapping somebody else's native handle (e.g. one recorded on a
++  // SYCL queue) has no chipStar dependencies to extract: wait on it directly.
++  if (!ChipEvent->ownsHandle()) {
++    std::shared_ptr<chipstar::Event> Keep(ChipEvent, [](chipstar::Event *) {});
++    auto BarrierEvent = ChipQueue->enqueueBarrier({Keep});
++    BarrierEvent->Msg = "hipStreamWaitEvent-nativeEvent";
++    RETURN(hipSuccess);
++  }
++
+   if (ChipEvent->getEventStatus() == EVENT_STATUS_INIT) {
+     logError("hipStreamWaitEventInternal: trying to enqueue a wait on an event "
+              "that hasn't been recorded yet",
+diff --git a/src/backend/Level0/CHIPBackendLevel0.cc b/src/backend/Level0/CHIPBackendLevel0.cc
+index 9cbbcd15..cf8716c7 100644
+--- a/src/backend/Level0/CHIPBackendLevel0.cc
++++ b/src/backend/Level0/CHIPBackendLevel0.cc
+@@ -36,6 +36,62 @@
+ // Auto-generated header that lives in <build-dir>/bitcode.
+ #include "rtdevlib-modules.h"
+ 
++#include <mutex>
++#include <unordered_map>
++#include <vector>
++
++namespace {
++// Recorded events get their device timestamp copied in by the GPU. Into
++// ordinary (pageable) host memory that copy costs ~300 us on Xe2 (Arc B70);
++// into USM host memory ~10 us. Hand out timestamp slots from USM host slabs,
++// one cache line per slot. Slabs live as long as the process.
++class TimestampSlots {
++  static constexpr size_t SlabBytes = 64 * 1024, Stride = 64;
++  std::mutex Mtx_;
++  std::unordered_map<ze_context_handle_t, std::vector<uint64_t *>> Free_;
++
++public:
++  uint64_t *get(ze_context_handle_t Ctx) {
++    std::lock_guard<std::mutex> Lock(Mtx_);
++    auto &Free = Free_[Ctx];
++    if (Free.empty()) {
++      ze_host_mem_alloc_desc_t Desc = {ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC};
++      void *Slab = nullptr;
++      if (zeMemAllocHost(Ctx, &Desc, SlabBytes, Stride, &Slab) !=
++              ZE_RESULT_SUCCESS ||
++          !Slab)
++        return nullptr;
++      for (size_t Off = SlabBytes; Off >= Stride; Off -= Stride)
++        Free.push_back(reinterpret_cast<uint64_t *>(
++            static_cast<char *>(Slab) + Off - Stride));
++    }
++    uint64_t *Slot = Free.back();
++    Free.pop_back();
++    *Slot = 0;
++    return Slot;
++  }
++  void put(ze_context_handle_t Ctx, uint64_t *Slot) {
++    std::lock_guard<std::mutex> Lock(Mtx_);
++    Free_[Ctx].push_back(Slot);
++  }
++};
++// Leaked on purpose: events can outlive static destruction.
++TimestampSlots &timestampSlots() {
++  static auto *Slots = new TimestampSlots;
++  return *Slots;
++}
++} // namespace
++
++uint64_t *CHIPEventLevel0::timestampSlot() {
++  if (!TimestampSlot_) {
++    auto *Ctx = static_cast<CHIPContextLevel0 *>(ChipContext_);
++    TimestampSlot_ = timestampSlots().get(Ctx->get());
++    if (!TimestampSlot_)
++      TimestampSlot_ = &TimestampFallback_; // USM allocation failed: slow path
++  }
++  return TimestampSlot_;
++}
++
+ using zexDriverImportExternalPointer_t =
+     ze_result_t (*)(ze_driver_handle_t, void *, size_t);
+ using zexDriverReleaseImportedPointer_t =
+@@ -296,7 +352,8 @@ void CHIPEventLevel0::reset() {
+   UserEvent_ = false;
+ 
+   EventStatus_ = EVENT_STATUS_INIT;
+-  Timestamp_ = 0;
++  if (TimestampSlot_)
++    *TimestampSlot_ = 0;
+   HostTimestamp_ = 0;
+   DeviceTimestamp_ = 0;
+   SignalEnqueued_ = false;
+@@ -315,11 +372,19 @@ void CHIPEventLevel0::reRecordReset() {
+   // barrier that referenced the handle is done and nothing else refers to it
+   // (nobody waits on this event's handle directly), so it is safe to destroy.
+   // This bounds RetiredSlots_ to the in-flight window across many re-records.
++  // Up to MaxSpareSlots of them are kept as spares instead of destroyed: they
++  // are exactly as unreferenced, and recycling one (a host reset, ~1 us) is far
++  // cheaper than the zeEventPoolCreate a fresh slot needs (~300 us on Xe2).
++  constexpr size_t MaxSpareSlots = 8;
+   for (auto It = RetiredSlots_.begin(); It != RetiredSlots_.end();) {
+     if (zeEventQueryStatus(It->second) == ZE_RESULT_SUCCESS) {
+-      zeEventDestroy(It->second);
+-      if (It->first)
+-        zeEventPoolDestroy(It->first);
++      if (It->first && SpareSlots_.size() < MaxSpareSlots) {
++        SpareSlots_.push_back(*It);
++      } else {
++        zeEventDestroy(It->second);
++        if (It->first)
++          zeEventPoolDestroy(It->first);
++      }
+       It = RetiredSlots_.erase(It);
+     } else {
+       ++It;
+@@ -330,8 +395,8 @@ void CHIPEventLevel0::reRecordReset() {
+   // referenced by an in-flight barrier from a circular stream-wait dependency,
+   // and host-resetting an in-use L0 event is UB (SEGVs in libze_intel_gpu).
+   // Instead retire the current handle (kept alive above until its signal fires)
+-  // and allocate a fresh handle for the new recording. A never-recorded handle
+-  // (fresh from the constructor) is reused as-is.
++  // and switch to a spare or fresh handle for the new recording. A
++  // never-recorded handle (fresh from the constructor) is reused as-is.
+   //
+   // Only fresh-slot for user events, which own a dedicated single-slot pool
+   // (retiring/destroying that pool is safe). Pooled events share a pool owned by
+@@ -339,32 +404,45 @@ void CHIPEventLevel0::reRecordReset() {
+   // are only recycled once RECORDED with no remaining dependents).
+   if (EventStatus_ != EVENT_STATUS_INIT) {
+     if (isUserEvent() && Event_) {
+-      // Build the fresh pool+event into locals FIRST; only commit the swap
+-      // (retire the old pair + adopt the new) once both allocations succeed.
+-      // Otherwise a throw from zeEventPoolCreate/zeEventCreate would leave
+-      // Event_/EventPoolHandle_ still aliasing a handle already pushed into
+-      // RetiredSlots_, double-freeing it at destruction.
+-      CHIPContextLevel0 *ZeCtx = (CHIPContextLevel0 *)ChipContext_;
+-      ze_event_pool_desc_t EventPoolDesc = {ZE_STRUCTURE_TYPE_EVENT_POOL_DESC,
+-                                            nullptr,
+-                                            ZE_EVENT_POOL_FLAG_HOST_VISIBLE, 1};
+-      ze_event_pool_handle_t FreshPool = nullptr;
+-      zeStatus =
+-          zeEventPoolCreate(ZeCtx->get(), &EventPoolDesc, 0, nullptr, &FreshPool);
+-      CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeEventPoolCreate);
+-      ze_event_desc_t EventDesc = {ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, 0,
+-                                   ZE_EVENT_SCOPE_FLAG_HOST,
+-                                   ZE_EVENT_SCOPE_FLAG_HOST};
+-      ze_event_handle_t FreshEvent = nullptr;
+-      zeStatus = zeEventCreate(FreshPool, &EventDesc, &FreshEvent);
+-      if (zeStatus != ZE_RESULT_SUCCESS)
+-        zeEventPoolDestroy(FreshPool); // don't leak the pool if event fails
+-      CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeEventCreate);
+-
+-      // Both allocations succeeded: retire the old handle and adopt the new.
++      ze_event_pool_handle_t NextPool = nullptr;
++      ze_event_handle_t NextEvent = nullptr;
++      while (!SpareSlots_.empty() && !NextEvent) {
++        auto Spare = SpareSlots_.back();
++        SpareSlots_.pop_back();
++        if (zeEventHostReset(Spare.second) == ZE_RESULT_SUCCESS) {
++          NextPool = Spare.first;
++          NextEvent = Spare.second;
++        } else {
++          zeEventDestroy(Spare.second);
++          zeEventPoolDestroy(Spare.first);
++        }
++      }
++      if (!NextEvent) {
++        // Build the fresh pool+event into locals FIRST; only commit the swap
++        // (retire the old pair + adopt the new) once both allocations succeed.
++        // Otherwise a throw from zeEventPoolCreate/zeEventCreate would leave
++        // Event_/EventPoolHandle_ still aliasing a handle already pushed into
++        // RetiredSlots_, double-freeing it at destruction.
++        CHIPContextLevel0 *ZeCtx = (CHIPContextLevel0 *)ChipContext_;
++        ze_event_pool_desc_t EventPoolDesc = {ZE_STRUCTURE_TYPE_EVENT_POOL_DESC,
++                                              nullptr,
++                                              ZE_EVENT_POOL_FLAG_HOST_VISIBLE, 1};
++        zeStatus = zeEventPoolCreate(ZeCtx->get(), &EventPoolDesc, 0, nullptr,
++                                     &NextPool);
++        CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeEventPoolCreate);
++        ze_event_desc_t EventDesc = {ZE_STRUCTURE_TYPE_EVENT_DESC, nullptr, 0,
++                                     ZE_EVENT_SCOPE_FLAG_HOST,
++                                     ZE_EVENT_SCOPE_FLAG_HOST};
++        zeStatus = zeEventCreate(NextPool, &EventDesc, &NextEvent);
++        if (zeStatus != ZE_RESULT_SUCCESS)
++          zeEventPoolDestroy(NextPool); // don't leak the pool if event fails
++        CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeEventCreate);
++      }
++
++      // Retire the old handle and adopt the new one.
+       RetiredSlots_.emplace_back(EventPoolHandle_, Event_);
+-      EventPoolHandle_ = FreshPool;
+-      Event_ = FreshEvent;
++      EventPoolHandle_ = NextPool;
++      Event_ = NextEvent;
+       EventPoolIndex = 0;
+     } else {
+       if (EventStatus_ == EVENT_STATUS_RECORDING)
+@@ -376,7 +454,8 @@ void CHIPEventLevel0::reRecordReset() {
+ 
+   TrackCalled_ = false;
+   EventStatus_ = EVENT_STATUS_INIT;
+-  Timestamp_ = 0;
++  if (TimestampSlot_)
++    *TimestampSlot_ = 0;
+   HostTimestamp_ = 0;
+   DeviceTimestamp_ = 0;
+   SignalEnqueued_ = false;
+@@ -409,9 +488,16 @@ CHIPEventLevel0::~CHIPEventLevel0() {
+       zeEventPoolDestroy(Slot.first);
+   }
+   RetiredSlots_.clear();
++  for (auto &Slot : SpareSlots_) { // already signaled; nothing references them
++    zeEventDestroy(Slot.second);
++    zeEventPoolDestroy(Slot.first);
++  }
++  SpareSlots_.clear();
+ 
+-  zeStatus = zeEventDestroy(Event_);
+-  assert(zeStatus == ZE_RESULT_SUCCESS);
++  if (OwnsHandle_) {
++    zeStatus = zeEventDestroy(Event_);
++    assert(zeStatus == ZE_RESULT_SUCCESS);
++  }
+ 
+   if (isUserEvent()) {
+     assert(!TrackCalled_ &&
+@@ -423,6 +509,11 @@ CHIPEventLevel0::~CHIPEventLevel0() {
+ 
+   Event_ = nullptr;
+   EventPoolHandle_ = nullptr;
++
++  if (TimestampSlot_ && TimestampSlot_ != &TimestampFallback_)
++    timestampSlots().put(static_cast<CHIPContextLevel0 *>(ChipContext_)->get(),
++                         TimestampSlot_);
++  TimestampSlot_ = nullptr;
+ }
+ 
+ CHIPEventLevel0::CHIPEventLevel0(CHIPContextLevel0 *ChipCtx,
+@@ -495,7 +586,13 @@ CHIPEventLevel0::CHIPEventLevel0(CHIPContextLevel0 *ChipCtx,
+ CHIPEventLevel0::CHIPEventLevel0(CHIPContextLevel0 *ChipCtx,
+                                  ze_event_handle_t NativeEvent)
+     : chipstar::Event((chipstar::Context *)(ChipCtx)), Event_(NativeEvent),
+-      EventPoolHandle_(nullptr), EventPoolIndex(0) {}
++      EventPoolHandle_(nullptr), OwnsHandle_(false), EventPoolIndex(0) {
++  // A native event handed in by the application (e.g. recorded on a SYCL
++  // queue) is by definition recorded: hipStreamWaitEvent must honor it rather
++  // than skipping "unrecorded" events.
++  EventStatus_ = EVENT_STATUS_RECORDING;
++  SignalEnqueued_ = true;
++}
+ 
+ void CHIPQueueLevel0::recordEvent(chipstar::Event *ChipEvent) {
+   auto ChipEventLz = static_cast<CHIPEventLevel0 *>(ChipEvent);
+@@ -525,10 +622,14 @@ void CHIPQueueLevel0::recordEvent(chipstar::Event *ChipEvent) {
+       addDependenciesQueueSync(TimestampWriteCompleteLz);
+   assert(TimestampWriteCompleteLz->SignalEnqueued_ == true);
+ 
+-  zeStatus = zeDeviceGetGlobalTimestamps(ChipDevLz_->get(),
+-                                         &ChipEventLz->getHostTimestamp(),
+-                                         &ChipEventLz->getDeviceTimestamp());
+-  CHIPERR_CHECK_LOG_AND_THROW_TABLE(zeDeviceGetGlobalTimestamps);
++  // The host timestamp only orders two events in getElapsedTime(); a host
++  // monotonic clock does that without the ~15 us zeDeviceGetGlobalTimestamps
++  // round trip per record.
++  ChipEventLz->getHostTimestamp() =
++      std::chrono::duration_cast<std::chrono::nanoseconds>(
++          std::chrono::steady_clock::now().time_since_epoch())
++          .count();
++  ChipEventLz->getDeviceTimestamp() = 0;
+ 
+   LOCK(*CmdListMtx_);
+   markBusy();
+@@ -650,7 +751,7 @@ unsigned long CHIPEventLevel0::getFinishTime() {
+   // (shifting by 64 bits is UB for 64-bit types)
+   uint64_t mask = (TimestampValidBits >= 64) ? UINT64_MAX 
+                                               : (((uint64_t)1 << TimestampValidBits) - 1);
+-  uint64_t T = (Timestamp_ & mask);
++  uint64_t T = (*timestampSlot() & mask);
+   T = T * TimerResolution;
+ 
+   return T;
+diff --git a/src/backend/Level0/CHIPBackendLevel0.hh b/src/backend/Level0/CHIPBackendLevel0.hh
+index 8b7bce71..f1c4faac 100644
+--- a/src/backend/Level0/CHIPBackendLevel0.hh
++++ b/src/backend/Level0/CHIPBackendLevel0.hh
+@@ -95,8 +95,12 @@ public:
+   using ActionFn = std::function<void()>;
+ 
+ private:
+-  /// Device timestamp gets ultimately stored here
+-  uint64_t Timestamp_ = 0;
++  /// Device timestamp gets ultimately stored here. The GPU copies it in, so it
++  /// lives in USM host memory (see timestampSlot()); a copy into ordinary
++  /// pageable host memory costs ~300 us per record on Xe2 versus ~10 us.
++  uint64_t *TimestampSlot_ = nullptr;
++  uint64_t TimestampFallback_ = 0;
++  uint64_t *timestampSlot();
+   /// Since device counters can overflow resulting in a negative time between
+   /// two events, we store host timestamp as well to correct for this
+   uint64_t HostTimestamp_ = 0, DeviceTimestamp_ = 0;
+@@ -105,6 +109,8 @@ private:
+   // The handler of event_pool and event
+   ze_event_handle_t Event_;
+   ze_event_pool_handle_t EventPoolHandle_;
++  /// False for events wrapping a handle somebody else owns (hipGetHipEventFromNativeEvent)
++  bool OwnsHandle_ = true;
+ 
+   // Per-record "slots" (fixes #1258): each hipEventRecord re-record allocates a
+   // fresh L0 event handle and retires the previous (pool, event) pair here,
+@@ -112,15 +118,18 @@ private:
+   // shared handle that may still be referenced by in-flight barriers from a
+   // circular stream-wait dependency (that reset SEGVs inside the L0 driver).
+   std::vector<std::pair<ze_event_pool_handle_t, ze_event_handle_t>> RetiredSlots_;
++  // Retired slots that have since signaled, kept for reuse by reRecordReset().
++  std::vector<std::pair<ze_event_pool_handle_t, ze_event_handle_t>> SpareSlots_;
+ 
+   std::vector<ActionFn> Actions_;
+ 
+ public:
+   ze_event_handle_t &get() { return Event_; }
+-  uint64_t &getTimestamp() { return Timestamp_; }
++  uint64_t &getTimestamp() { return *timestampSlot(); }
+   uint64_t &getDeviceTimestamp() { return DeviceTimestamp_; }
+   uint64_t &getHostTimestamp() { return HostTimestamp_; }
+   uint32_t getValidTimestampBits();
++  bool ownsHandle() const override { return OwnsHandle_; }
+   unsigned int EventPoolIndex;
+   CHIPEventLevel0()
+       : CHIPEventLevel0((CHIPContextLevel0 *)Backend->getActiveContext()) {}

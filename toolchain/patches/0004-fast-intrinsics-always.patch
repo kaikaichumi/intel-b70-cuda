@@ -1,0 +1,91 @@
+diff --git a/include/hip/devicelib/single_precision/sp_intrinsics.hh b/include/hip/devicelib/single_precision/sp_intrinsics.hh
+index 59df7e7f..75bb3a78 100644
+--- a/include/hip/devicelib/single_precision/sp_intrinsics.hh
++++ b/include/hip/devicelib/single_precision/sp_intrinsics.hh
+@@ -53,7 +53,7 @@ extern "C++" inline __device__ float __cosf(float x) {
+ extern "C++" __device__ float native_exp10(float x); // OpenCL
+ extern "C++" __device__ float exp10(float x);        // OpenCL
+ extern "C++" inline __device__ float __exp10f(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+   return native_exp10(x);
+ #else
+   return exp10(x);
+@@ -63,7 +63,7 @@ extern "C++" inline __device__ float __exp10f(float x) {
+ extern "C++" __device__ float native_exp(float x); // OpenCL
+ extern "C++" __device__ float exp(float x);        // OpenCL
+ extern "C++" inline __device__ float __expf(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+   return native_exp(x);
+ #else
+   return exp(x);
+@@ -149,7 +149,7 @@ extern "C++" inline __device__ float __fdiv_rz(float x, float y) {
+ extern "C++" __device__ float native_divide(float x, float y); // OpenCL
+ extern "C++" __device__ float divide(float x, float y);        // OpenCL
+ extern "C++" inline __device__ float __fdividef(float x, float y) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+   return native_divide(x, y);
+ #else
+   return x / y;
+@@ -353,7 +353,7 @@ extern "C++" inline __device__ float __fsub_rz(float x, float y) {
+ extern "C++" __device__ float native_log10(float x); // OpenCL
+ extern "C++" __device__ float log10(float x);        // OpenCL
+ extern "C++" inline __device__ float __log10f(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+     return native_log10(x);
+ #else
+    return log10(x); 
+@@ -363,7 +363,7 @@ extern "C++" inline __device__ float __log10f(float x) {
+ extern "C++" __device__ float native_log2(float x); // OpenCL
+ extern "C++" __device__ float log2(float x);        // OpenCL
+ extern "C++" inline __device__ float __log2f(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+     return native_log2(x);
+ #else
+     return log2(x);
+@@ -373,7 +373,7 @@ extern "C++" inline __device__ float __log2f(float x) {
+ extern "C++" __device__ float native_log(float x); // OpenCL
+ extern "C++" __device__ float log(float x);        // OpenCL
+ extern "C++" inline __device__ float __logf(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+     return native_log(x);
+ #else
+     return log(x);
+@@ -385,7 +385,7 @@ extern "C++" __device__ float exp2(float x);        // OpenCL
+ // extern "C++" inline __device__ float native_log2 ( float  x, float  y ); //
+ // OpenCL (already declared)
+ extern "C++" inline __device__ float __powf(float x, float y) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+     return native_exp2(y * native_log2(x));
+ #else
+     return pow(x, y);
+@@ -415,12 +415,21 @@ extern "C++" inline __device__ void __sincosf(float x, float *sptr,
+ 
+ // extern "C++" __device__ float native_sin(float x); // OpenCL (already
+ // declared)
+-extern "C++" inline __device__ float __sinf(float x) { return native_sin(x); }
++extern "C++" inline __device__ float __sinf(float x) {
++#ifdef CHIP_FAST_MATH
++  return native_sin(x);
++#else
++  // b70 patch 0004: Intel native_sin/native_cos are only accurate to ~3e-5 (CUDA
++  // promises 2^-21.4 for __sinf/__cosf on [-pi, pi]), so these stay precise unless
++  // fast math is requested.
++  return sin(x);
++#endif
++}
+ 
+ extern "C++" __device__ float native_tan(float x); // OpenCL
+ extern "C++" __device__ float tan(float x);        // OpenCL
+ extern "C++" inline __device__ float __tanf(float x) {
+-#ifdef CHIP_FAST_MATH
++#if !defined(CHIP_PRECISE_INTRINSICS) /* b70 patch 0004: always the fast version, as in CUDA */
+     return native_tan(x);
+ #else
+     return tan(x);

@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.b70venv/
+build/
+*.o
+*.so
+*.spv
+*.png
+!docs/**/*.png

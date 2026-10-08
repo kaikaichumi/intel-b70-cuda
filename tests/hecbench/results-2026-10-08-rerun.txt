@@ -1,0 +1,14 @@
+M2 rerun (2026-10-08) of the 4 benchmarks that failed in the first round for
+toolchain-environment reasons: all-pairs-distance / laplace needed cub/cub.cuh
+(now shipped in toolchain/include over hipCUB), bilateral / heat2d needed
+libomp.so at run time (now on the b70cuda library path).
+Same machine, same drivers, one wall-clock run each, other GPU work present.
+
+    CUDA via b70cc: 4 benchmarks, 4 built, 4 ran, 4 self-verified PASS
+    SYCL/CUDA time ratio: all-pairs-distance 0.80, laplace 0.98, bilateral 0.90, heat2d 1.08
+
+name,cuda_build,cuda_run,cuda_verified,cuda_seconds,sycl_build,sycl_run,sycl_verified,sycl_seconds
+all-pairs-distance,ok,ok,yes,9.02,ok,ok,yes,7.24
+laplace,ok,ok,yes,307.02,ok,ok,yes,301.99
+bilateral,ok,ok,yes,14.29,ok,ok,yes,12.87
+heat2d,ok,ok,yes,33.71,ok,ok,yes,36.50

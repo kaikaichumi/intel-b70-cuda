@@ -1,0 +1,8 @@
+// b70 toolchain: libcu++ <cuda/std/type_traits> -> the host standard library.
+// chipStar compiles device code with clang's libstdc++/libc++ headers, whose
+// type traits are constexpr and usable in device code, so cuda::std is std.
+#pragma once
+#include <type_traits>
+namespace cuda {
+namespace std = ::std;
+}

@@ -1,0 +1,46 @@
+diff --git a/llvm_passes/HipDynMem.cpp b/llvm_passes/HipDynMem.cpp
+index 87e73ff7..944667c0 100644
+--- a/llvm_passes/HipDynMem.cpp
++++ b/llvm_passes/HipDynMem.cpp
+@@ -21,6 +21,7 @@
+ 
+ #include "llvm/ADT/SetVector.h"
+ #include "llvm/ADT/Statistic.h"
++#include "llvm/IR/DataLayout.h"
+ #include "llvm/IR/Function.h"
+ #include "llvm/IR/GlobalValue.h"
+ #include "llvm/IR/GlobalVariable.h"
+@@ -67,7 +68,33 @@ private:
+     return false;
+   }
+ 
++  // Intel's IGC (seen with 2.28 and 2.38 on Xe2, SIMD32) mis-addresses
++  // sub-group-uniform local-memory accesses whose offset from the dynamic
++  // shared memory argument folds to a constant immediate in [32 KB, 64 KB):
++  // the values read back are zero. hipCUB BlockReduce/BlockScan storage carved
++  // out of a large extern __shared__ buffer (Mamba's selective scan) hits it.
++  // Routing every use through  arg + (ptrtoint(arg) >> 40)  -- zero at run
++  // time (the raw local pointer is a small SLM window address, 0x10000000 +
++  // offset on Xe2), but not foldable -- keeps the offsets in registers, which
++  // IGC addresses correctly. tests/cuda/scan_transpose_hist.cu and
++  // tests/cuda/cub_block.cu cover both the shift being zero and the bug.
++  static Value *opaqueDynMemArg(Function *F, Argument *DynArg) {
++    BasicBlock &Entry = F->getEntryBlock();
++    std::string Name = (DynArg->getName() + ".opaque").str();
++    for (Instruction &I : Entry)
++      if (I.getName() == Name)
++        return &I;
++    IRBuilder<> B(&Entry, Entry.getFirstNonPHIOrDbgOrAlloca());
++    const DataLayout &DL = F->getParent()->getDataLayout();
++    Type *IntTy = DL.getIntPtrType(DynArg->getType());
++    Value *Addr = B.CreatePtrToInt(DynArg, IntTy, DynArg->getName() + ".addr");
++    Value *Zero = B.CreateLShr(Addr, ConstantInt::get(IntTy, 40), DynArg->getName() + ".zero");
++    return B.CreateGEP(B.getInt8Ty(), DynArg, Zero, Name);
++  }
++
+   static void replaceGVarUsesWith(GlobalVariable *GV, Function *F, Value *Repl) {
++    if (Argument *A = dyn_cast<Argument>(Repl))
++      Repl = opaqueDynMemArg(F, A);
+     SmallVector<unsigned, 8> OperToReplace;
+     for (Function::iterator BB = F->begin(); BB != F->end(); ++BB) {
+       for (BasicBlock::iterator i = BB->begin(); i != BB->end(); ++i) {

@@ -1,0 +1,5 @@
+Metadata-Version: 2.1
+Name: sageattention
+Version: 2.2.0
+Summary: b70 shim: SageAttention API on torch scaled_dot_product_attention (Intel XPU). Not the real SageAttention.
+License: Apache-2.0

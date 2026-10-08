@@ -1,0 +1,248 @@
+#!/bin/bash
+# b70 — use the Intel Arc Pro B70 the way you would use a CUDA box.
+# Everything runs in the b70-ai container: torch XPU + the CUDA->XPU layer +
+# an SDPA-based flash_attn. Run `b70 help` for the commands.
+set -euo pipefail
+
+KIT=$(dirname "$(readlink -f "$0")")
+# Per-machine settings (B70_DATA, B70_MOUNTS, B70_GPU_PCI, B70_VLLM ...) can go in
+# ~/.config/b70/config as plain shell assignments; the environment wins over it.
+CONF=${B70_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/b70/config}
+if [ -f "$CONF" ]; then
+    while IFS='=' read -r k v; do
+        case "$k" in B70_*) [ -z "${!k:-}" ] && export "$k=$v" ;; esac
+    done < <(grep -E '^B70_[A-Z_]+=' "$CONF")
+fi
+IMAGE=${B70_IMAGE_NAME:-b70-ai:latest}
+DATA=${B70_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/b70}   # models and caches
+MOUNTS=${B70_MOUNTS:-}          # extra host dirs visible in the container (space separated)
+GPU_PCI=${B70_GPU_PCI:-}        # empty: auto-detect the first GPU driven by xe
+VLLM=${B70_VLLM:-vllm}          # name of a vLLM container sharing the card, if any
+COMFY_DIR=${B70_COMFY:-$DATA/ComfyUI}
+COMFY_PORT=${B70_COMFY_PORT:-8188}
+
+usage() {
+    cat <<EOF
+b70 — run CUDA-style AI code on the Arc Pro B70
+
+  b70 python script.py ...    run a script ("cuda" works: .cuda(), device="cuda", ...)
+  b70 run CMD ...             run any command in the B70 environment, here
+  b70 shell                   interactive shell in the B70 environment, here
+  b70 install ARGS ...        pip install for this folder, e.g. -r requirements.txt
+                              (creates ./.b70venv; CUDA-only packages are filtered out)
+
+  b70 bg NAME CMD ...         run CMD in the background as container b70-NAME
+  b70 ps | logs NAME | stop NAME
+
+  b70 comfyui [stop]          ComfyUI on http://$(hostname -I 2>/dev/null | cut -d' ' -f1):$COMFY_PORT
+  b70 gpu                     who is using the B70 and how much VRAM is free
+  b70 gpu free                stop vLLM to give the whole card to other models
+  b70 gpu llm                 start vLLM again (takes a few minutes to load)
+
+  b70 build                   (re)build the b70-ai image
+  b70 test                    run the self-tests
+
+Env: B70_CUDA=0 turns the CUDA->XPU layer off for one run.
+Data (models, caches): $DATA
+EOF
+}
+
+die() { echo "b70: $*" >&2; exit 1; }
+note() { echo "b70: $*" >&2; }
+
+image_exists() { docker image inspect "$IMAGE" >/dev/null 2>&1; }
+
+detect_gpu() {  # PCI address of the first render node bound to the xe driver
+    local r dev
+    for r in /sys/class/drm/renderD*; do
+        dev=$(readlink -f "$r/device")
+        if [ "$(basename "$(readlink -f "$dev/driver")")" = xe ]; then
+            basename "$dev"
+            return 0
+        fi
+    done
+    return 1
+}
+
+base_args() {
+    local render card m
+    [ -n "$GPU_PCI" ] || GPU_PCI=$(detect_gpu) ||
+        die "no Intel GPU on the xe driver found (set B70_GPU_PCI=0000:xx:00.0)"
+    render=$(readlink -f "/dev/dri/by-path/pci-$GPU_PCI-render" 2>/dev/null) ||
+        die "no GPU render node for PCI $GPU_PCI (set B70_GPU_PCI)"
+    card=$(readlink -f "/dev/dri/by-path/pci-$GPU_PCI-card" 2>/dev/null) || card=""
+    mkdir -p "$DATA"/{home,hf,torch,cache/pip,cache/neo,cache/sycl,cache/triton}
+    ARGS=(--init
+        --device "$render"
+        --group-add "$(getent group render | cut -d: -f3)"
+        --group-add "$(getent group video | cut -d: -f3)"
+        --user "$(id -u):$(id -g)"
+        --ipc=host --network host
+        -v "$HOME:$HOME" -v "$DATA:$DATA"
+        -w "$PWD"
+        -e HOME="$DATA/home" -e HF_HOME="$DATA/hf" -e TORCH_HOME="$DATA/torch" -e B70_DATA="$DATA"
+        -e XDG_CACHE_HOME="$DATA/cache" -e PIP_CACHE_DIR="$DATA/cache/pip"
+        -e NEO_CACHE_DIR="$DATA/cache/neo" -e SYCL_CACHE_DIR="$DATA/cache/sycl"
+        -e TRITON_CACHE_DIR="$DATA/cache/triton"
+        -e TERM -e B70_CUDA -e B70_CUDA_NATIVE -e B70_CUDA_VERBOSE
+        -e CHIP_BE="${CHIP_BE:-level0}" -e CHIP_LOGLEVEL="${CHIP_LOGLEVEL:-err}"
+        -e CHIP_MODULE_CACHE_DIR="$DATA/cache/chipstar"
+        -e HF_TOKEN -e HF_ENDPOINT -e HF_HUB_OFFLINE -e PYTHONUNBUFFERED)
+    [ -n "$card" ] && ARGS+=(--device "$card")
+    for m in $MOUNTS; do
+        ARGS+=(-v "$m:$m")
+    done
+    case "$PWD/" in
+        "$HOME"/*|"$DATA"/*) ;;
+        *) ARGS+=(-v "$PWD:$PWD") ;;
+    esac
+    if [ -n "${B70_DOCKER_ARGS:-}" ]; then
+        # shellcheck disable=SC2206
+        ARGS+=($B70_DOCKER_ARGS)
+    fi
+}
+
+vllm_running() { [ -n "$(docker ps -q -f "name=^${VLLM}\$")" ]; }
+
+vram_hint() {
+    [ -n "${B70_QUIET:-}" ] && return 0
+    if vllm_running; then
+        note "vLLM is running and holds most of the VRAM (about 2-3 GB left)."
+        note "For big models run 'b70 gpu free' first, and 'b70 gpu llm' afterwards."
+    fi
+}
+
+need_image() {
+    image_exists || die "image $IMAGE not built yet — run: b70 build"
+}
+
+run_fg() {  # run_fg CMD... : foreground container, here
+    need_image
+    base_args
+    local tty=(-i)
+    [ -t 0 ] && [ -t 1 ] && tty=(-it)
+    exec docker run --rm "${tty[@]}" "${ARGS[@]}" "$IMAGE" "$@"
+}
+
+cmd_install() {
+    need_image
+    base_args
+    # Everything happens inside one container so the filtered files are visible to pip.
+    # shellcheck disable=SC2016
+    exec docker run --rm -i "${ARGS[@]}" "$IMAGE" bash -c '
+set -e
+venv=""
+d=$PWD
+while [ -n "$d" ] && [ "$d" != "/" ]; do
+    [ -x "$d/.b70venv/bin/python" ] && { venv="$d/.b70venv"; break; }
+    d=$(dirname "$d")
+done
+if [ -z "$venv" ]; then
+    venv="$PWD/.b70venv"
+    echo "b70: creating $venv (inherits torch XPU and the rest of the image)" >&2
+    /usr/bin/python3.12 -m venv --without-pip "$venv"
+    sp=$(echo "$venv"/lib/python3.12/site-packages)
+    echo "import site; site.addsitedir(\"/opt/venv/lib/python3.12/site-packages\")" > "$sp/_b70_image.pth"
+    for p in pip pip3; do
+        printf "#!/bin/sh\nexec \"\$(dirname \"\$0\")/python\" -m pip \"\$@\"\n" > "$venv/bin/$p"
+        chmod +x "$venv/bin/$p"
+    done
+fi
+[ "$#" -eq 0 ] && { echo "b70: venv ready at $venv" >&2; exit 0; }
+tmp=$(mktemp -d)
+mapfile -t args < <("$venv/bin/python" -m b70cuda.pipfilter "$tmp" "$@")
+[ "${#args[@]}" -eq 0 ] && { echo "b70: nothing left to install" >&2; exit 0; }
+exec "$venv/bin/python" -m pip install "${args[@]}"
+' b70-install "$@"
+}
+
+cmd_bg() {
+    [ $# -ge 2 ] || die "usage: b70 bg NAME CMD ..."
+    need_image
+    local name="b70-$1"; shift
+    [ -n "$(docker ps -q -f "name=^${name}\$")" ] && die "$name is already running (b70 stop ${name#b70-})"
+    docker rm "$name" >/dev/null 2>&1 || true   # a finished/crashed earlier run
+    base_args
+    docker run -d --name "$name" "${ARGS[@]}" "$IMAGE" "$@" >/dev/null
+    echo "started $name — b70 logs ${name#b70-} / b70 stop ${name#b70-}"
+}
+
+gpu_status() {
+    if vllm_running; then echo "vLLM:      running (container $VLLM)"
+    else echo "vLLM:      stopped"; fi
+    local others
+    others=$(docker ps --format '{{.Names}}' | grep -E '^b70-' | tr '\n' ' ' || true)
+    echo "b70 jobs:  ${others:-none}"
+    if image_exists; then
+        base_args
+        docker run --rm "${ARGS[@]}" -e B70_CUDA=0 "$IMAGE" python -c '
+import torch
+f, t = torch.xpu.mem_get_info(0)
+print("VRAM:      %.1f GiB free of %.1f GiB  (%s)" % (f / 2**30, t / 2**30, torch.xpu.get_device_name(0)))
+' 2>/dev/null || echo "VRAM:      (could not query)"
+    fi
+}
+
+cmd_gpu() {
+    case "${1:-status}" in
+        status) gpu_status ;;
+        free)
+            if vllm_running; then
+                note "stopping vLLM (the API on :8000 goes away until 'b70 gpu llm')"
+                docker stop -t 60 "$VLLM" >/dev/null
+            else
+                note "vLLM is already stopped"
+            fi
+            gpu_status ;;
+        llm)
+            if vllm_running; then note "vLLM is already running"; exit 0; fi
+            local jobs
+            jobs=$(docker ps --format '{{.Names}}' | grep -E '^b70-' || true)
+            [ -n "$jobs" ] && note "still running on the B70: $jobs — vLLM may not fit; b70 stop NAME"
+            docker start "$VLLM" >/dev/null
+            note "vLLM starting with its previous settings; loading takes a few minutes (docker logs -f $VLLM)" ;;
+        *) die "usage: b70 gpu [status|free|llm]" ;;
+    esac
+}
+
+cmd_comfyui() {
+    if [ "${1:-}" = "stop" ]; then docker stop b70-comfyui; exit 0; fi
+    need_image
+    if [ ! -f "$COMFY_DIR/main.py" ]; then
+        note "installing ComfyUI into $COMFY_DIR"
+        git clone --depth 1 https://github.com/Comfy-Org/ComfyUI "$COMFY_DIR"
+        (cd "$COMFY_DIR" && "$0" install -r requirements.txt)
+    fi
+    vram_hint
+    cd "$COMFY_DIR"
+    cmd_bg comfyui python main.py --listen 0.0.0.0 --port "$COMFY_PORT" "$@"
+    echo "ComfyUI: http://$(hostname -I | cut -d' ' -f1):$COMFY_PORT   (models go in $COMFY_DIR/models)"
+}
+
+cmd_build() {
+    local src=${B70_BASE_SRC:-vllm/vllm-openai-xpu:latest}
+    local tag
+    tag="b70-base:$(date +%Y%m%d)"
+    docker image inspect "$src" >/dev/null 2>&1 || die "base image $src not found"
+    docker tag "$src" "$tag"
+    docker tag "$src" b70-base:latest
+    docker build -t "$IMAGE" --build-arg BASE="$tag" -f "$KIT/Dockerfile" "$(dirname "$KIT")"
+}
+
+case "${1:-help}" in
+    help|-h|--help) usage ;;
+    run) shift; [ $# -ge 1 ] || die "usage: b70 run CMD ..."; vram_hint; run_fg "$@" ;;
+    python|python3) shift; vram_hint; run_fg python "$@" ;;
+    shell|sh|bash) shift; run_fg bash "$@" ;;
+    install|pip) shift; cmd_install "$@" ;;
+    venv) cmd_install ;;
+    bg) shift; vram_hint; cmd_bg "$@" ;;
+    ps) docker ps -a --filter 'name=^b70-' --format 'table {{.Names}}\t{{.Status}}\t{{.Command}}' ;;
+    logs) shift; [ $# -ge 1 ] || die "usage: b70 logs NAME"; exec docker logs -f "b70-$1" ;;
+    stop) shift; [ $# -ge 1 ] || die "usage: b70 stop NAME"; docker stop "b70-$1" >/dev/null; docker rm "b70-$1" >/dev/null 2>&1 || true; echo "stopped b70-$1" ;;
+    gpu) shift; cmd_gpu "$@" ;;
+    comfyui|comfy) shift; cmd_comfyui "$@" ;;
+    build) cmd_build ;;
+    test) shift; cd "$KIT/tests"; B70_QUIET=1 run_fg python run_all.py "$@" ;;
+    *) die "unknown command '$1' — b70 help" ;;
+esac

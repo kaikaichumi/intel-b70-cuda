@@ -1,0 +1,36 @@
+# M3 kernel-time set: the HeCBench programs whose CUDA (b70cc) and SYCL (icpx) versions both
+# printed PASS in the M2 run (results-2026-10-08*.txt).  Used by kernel_times.sh.
+adam
+all-pairs-distance
+bilateral
+bitonic-sort
+chi2
+colorwheel
+convolutionSeparable
+dct8x8
+entropy
+fdtd3d
+floydwarshall
+gaussian
+haccmk
+hausdorff
+heat2d
+iso2dfd
+jacobi
+jenkins-hash
+laplace
+lombscargle
+matrix-rotate
+minisweep
+nbody
+nlll
+nqueen
+nw
+perplexity
+pnpoly
+present
+radixsort
+scan
+stddev
+tsa
+vanGenuchten

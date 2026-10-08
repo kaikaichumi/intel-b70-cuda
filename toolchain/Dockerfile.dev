@@ -1,0 +1,9 @@
+# b70-cuda-dev: build/run environment for the source-level CUDA toolchain.
+# Intel's oneAPI devel image already has gcc, cmake, the Level Zero/OpenCL runtime
+# for Xe2, icpx (for SYCL baselines) and oneMKL; chipStar's build additionally wants:
+FROM intel/deep-learning-essentials:2026.0.0-devel-ubuntu24.04
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3-yaml zlib1g-dev libxml2-dev libzstd-dev libedit-dev ninja-build xxd && \
+    rm -rf /var/lib/apt/lists/*

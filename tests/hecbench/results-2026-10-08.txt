@@ -1,0 +1,71 @@
+M2  CUDA via b70cc over 61 benchmarks
+    built 57 (93%), ran 48 (79%), self-verified PASS 32 (52%), ran without a PASS line 16
+    did not build:             all-pairs-distance, laplace, layernorm, softmax
+    built but did not finish:  bfs(crash(2)), bilateral(crash(2)), cfd(crash(2)), convolution1D(timeout), heat2d(crash(2)), hotspot(crash(2)), hotspot3D(crash(2)), kmeans(crash(2)), urng(crash(2))
+M3  30 benchmarks verified on both sides; geomean SYCL/CUDA time = 0.88 (CUDA build slower)
+    slowest CUDA relative to SYCL: tsa 0.34, hausdorff 0.37, bitonic-sort 0.65, jacobi 0.67, lombscargle 0.73, pnpoly 0.75
+    fastest CUDA relative to SYCL: matrix-rotate 0.99, nw 1.02, nlll 1.02, adam 1.13, iso2dfd 1.68, gaussian 2.30
+
+== per-benchmark (name, cuda build/run/verified/sec, sycl build/run/verified/sec):
+name,cuda_build,cuda_run,cuda_verified,cuda_seconds,sycl_build,sycl_run,sycl_verified,sycl_seconds
+adam,ok,ok,yes,4.61,ok,ok,yes,5.20
+all-pairs-distance,fail,skip,no,,ok,ok,yes,7.63
+atomicCost,ok,ok,yes,161.18,ok,crash(2),no,
+backprop,ok,ok,yes,1.43,ok,timeout,no,
+bfs,ok,crash(2),no,,ok,crash(2),no,
+bilateral,ok,crash(2),no,,ok,ok,yes,13.12
+binomial,ok,ok,no,5.87,ok,ok,no,1.34
+bitonic-sort,ok,ok,yes,15.82,ok,ok,yes,10.25
+black-scholes,ok,ok,no,4.77,ok,ok,no,4.10
+bsearch,ok,ok,no,2.71,ok,ok,no,2.01
+cfd,ok,crash(2),no,,ok,crash(2),no,
+chi2,ok,ok,yes,42.29,ok,ok,yes,41.41
+colorwheel,ok,ok,yes,1.51,ok,ok,yes,1.31
+convolution1D,ok,timeout,no,,ok,timeout,no,
+convolutionSeparable,ok,ok,yes,5.95,ok,ok,yes,5.81
+crc64,ok,ok,no,3.77,ok,ok,no,2.58
+dct8x8,ok,ok,yes,2.14,ok,ok,yes,2.00
+entropy,ok,ok,yes,13.44,ok,ok,yes,11.09
+extrema,ok,ok,no,6.79,ok,ok,no,7.70
+fdtd3d,ok,ok,yes,5.58,ok,ok,yes,4.82
+floydwarshall,ok,ok,yes,1.48,ok,ok,yes,1.46
+gaussian,ok,ok,yes,8.12,ok,ok,yes,18.69
+haccmk,ok,ok,yes,1.62,ok,ok,yes,1.44
+hausdorff,ok,ok,yes,20.35,ok,ok,yes,7.47
+heat2d,ok,crash(2),no,,ok,ok,yes,35.96
+histogram,ok,ok,no,0.90,ok,ok,no,0.51
+hotspot,ok,crash(2),no,,ok,crash(2),no,
+hotspot3D,ok,crash(2),no,,ok,crash(2),no,
+interleave,ok,ok,no,1.49,ok,ok,no,1.35
+iso2dfd,ok,ok,yes,3.42,ok,ok,yes,5.73
+jacobi,ok,ok,yes,1.16,ok,ok,yes,0.78
+jenkins-hash,ok,ok,yes,1.88,ok,ok,yes,1.78
+kmeans,ok,crash(2),no,,ok,crash(2),no,
+laplace,fail,skip,no,,ok,ok,yes,424.30
+lavaMD,ok,ok,no,0.58,ok,ok,no,0.65
+layernorm,fail,skip,no,,ok,ok,no,131.32
+lombscargle,ok,ok,yes,1.21,ok,ok,yes,0.88
+lud,ok,ok,no,0.87,ok,ok,no,0.84
+mandelbrot,ok,ok,no,3.20,ok,ok,no,2.79
+matrix-rotate,ok,ok,yes,6.03,ok,ok,yes,5.95
+md,ok,ok,no,21.83,ok,ok,no,22.10
+minisweep,ok,ok,yes,12.81,ok,ok,yes,12.40
+murmurhash3,ok,ok,no,1.31,ok,ok,no,1.34
+nbody,ok,ok,yes,8.87,ok,ok,yes,7.95
+nlll,ok,ok,yes,0.53,ok,ok,yes,0.54
+nqueen,ok,ok,yes,18.49,ok,ok,yes,14.17
+nw,ok,ok,yes,7.98,ok,ok,yes,8.12
+pathfinder,ok,ok,no,2.48,ok,ok,no,1.98
+perplexity,ok,ok,yes,1.23,ok,ok,yes,1.02
+pnpoly,ok,ok,yes,25.68,ok,ok,yes,19.19
+present,ok,ok,yes,4.06,ok,ok,yes,3.81
+radixsort,ok,ok,yes,2.60,ok,ok,yes,2.18
+rsbench,ok,ok,no,7.53,ok,ok,no,7.30
+scan,ok,ok,yes,291.31,ok,ok,yes,267.71
+softmax,fail,skip,no,,ok,ok,yes,6.42
+stddev,ok,ok,yes,32.34,ok,ok,yes,31.71
+su3,ok,ok,no,2.05,ok,ok,no,3.22
+tsa,ok,ok,yes,7.00,ok,ok,yes,2.38
+urng,ok,crash(2),no,,ok,crash(2),no,
+vanGenuchten,ok,ok,yes,12.41,ok,ok,yes,10.20
+xsbench,ok,ok,no,49.21,ok,ok,no,54.27
