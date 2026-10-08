@@ -386,6 +386,16 @@ icpx 要同時靠預設的 fast-math（允許 `min` 歸約重排）和它自己�
 **還真的慢的**（下一輪目標）：fdtd3d 0.57（stencil、共享記憶體，`--use_fast_math` 沒有幫助：0.367 ms）、bilateral 0.66、laplace 0.70、jacobi 0.72。
 這幾個要看 IGC 產生的程式碼（暫存器、SIMD 寬度、共享記憶體存取方式）跟 SYCL 版的差異。
 
+### 4. 兩層各自的開銷（2026-10-09，vLLM 在線）
+
+**工具鏈**（`bench/micro.cu` 對 `bench/micro_sycl.cpp`，同一支程式）：stream copy／scale／add／triad 518／520／533／531 GB/s 對 SYCL 529／529／533／531 GB/s（差 0～2%）；
+kernel 啟動 1.88 µs 對 2.32 µs（CUDA 版快）；float atomic 7.09 對 6.72 G ops/s（CUDA 版快）。加上第 3 節的 HeCBench kernel 幾何平均 0.89，
+整體來說同一段 CUDA 原始碼經 b70cc 跑，比手寫 SYCL 原生版平均慢約 10%，頻寬類的工作沒有差別。
+
+**PyTorch 層**（同一段 torch 程式，`"cuda"` 經轉接層對 `"xpu"` 原生，`B70_CUDA=0`）：matmul 4096² bf16 0.83 對 1.02 ms（兩次量測的抖動，同一個 oneDNN kernel）、
+SDPA 4k token 0.83 對 0.83 ms、conv2d 0.58 對 0.58 ms、TransformerEncoderLayer 前向 0.99 對 0.97 ms、1000 個小運算 9.99 對 10.45 ms、
+`.to(device)` 0.017 對 0.015 ms。轉接層只改裝置名稱的解析，不碰運算本身，開銷在量測誤差內（0%）。
+
 ## 測試與效能的做法
 
 - 所有驗收測試放在 `tests/`，效能測試放在 `bench/`，都要能用一個指令重跑
