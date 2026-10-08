@@ -386,6 +386,16 @@ Conclusion: the M3 ① comparison baseline itself is biased toward SYCL (which d
 **The genuinely slow ones** (targets for the next round): fdtd3d 0.57 (stencil, shared memory; `--use_fast_math` does not help: 0.367 ms), bilateral 0.66, laplace 0.70, jacobi 0.72.
 These need a look at the differences between the code IGC generates (registers, SIMD width, shared memory access patterns) and the SYCL version.
 
+### 4. Overhead of each layer (2026-10-09, vLLM online)
+
+**Toolchain** (`bench/micro.cu` vs `bench/micro_sycl.cpp`, the same program): stream copy/scale/add/triad 518/520/533/531 GB/s vs SYCL 529/529/533/531 GB/s (0–2% apart);
+kernel launch 1.88 µs vs 2.32 µs (CUDA build faster); float atomics 7.09 vs 6.72 G ops/s (CUDA build faster). Together with the HeCBench kernel geometric mean of 0.89 in section 3,
+the same CUDA source run through b70cc is on average about 10% slower than a hand-written native SYCL version, with no difference on bandwidth-bound work.
+
+**PyTorch layer** (the same torch code, `"cuda"` through the layer vs `"xpu"` native with `B70_CUDA=0`; `bench/layer_overhead.py`): matmul 4096² bf16 0.83 vs 1.02 ms (run-to-run jitter, same oneDNN kernel),
+SDPA 4k tokens 0.83 vs 0.83 ms, conv2d 0.58 vs 0.58 ms, TransformerEncoderLayer forward 0.99 vs 0.97 ms, 1000 tiny ops 9.99 vs 10.45 ms,
+`.to(device)` 0.017 vs 0.015 ms. The layer only changes how device names are resolved and never touches the computation; its overhead is within measurement noise (0%).
+
 ## Approach to tests and performance
 
 - All acceptance tests live in `tests/`, performance tests in `bench/`; all must be re-runnable with a single command

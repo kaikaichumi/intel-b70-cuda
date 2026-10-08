@@ -392,7 +392,7 @@ icpx 要同時靠預設的 fast-math（允許 `min` 歸約重排）和它自己�
 kernel 啟動 1.88 µs 對 2.32 µs（CUDA 版快）；float atomic 7.09 對 6.72 G ops/s（CUDA 版快）。加上第 3 節的 HeCBench kernel 幾何平均 0.89，
 整體來說同一段 CUDA 原始碼經 b70cc 跑，比手寫 SYCL 原生版平均慢約 10%，頻寬類的工作沒有差別。
 
-**PyTorch 層**（同一段 torch 程式，`"cuda"` 經轉接層對 `"xpu"` 原生，`B70_CUDA=0`）：matmul 4096² bf16 0.83 對 1.02 ms（兩次量測的抖動，同一個 oneDNN kernel）、
+**PyTorch 層**（同一段 torch 程式，`"cuda"` 經轉接層對 `"xpu"` 原生，`B70_CUDA=0`；`bench/layer_overhead.py`）：matmul 4096² bf16 0.83 對 1.02 ms（兩次量測的抖動，同一個 oneDNN kernel）、
 SDPA 4k token 0.83 對 0.83 ms、conv2d 0.58 對 0.58 ms、TransformerEncoderLayer 前向 0.99 對 0.97 ms、1000 個小運算 9.99 對 10.45 ms、
 `.to(device)` 0.017 對 0.015 ms。轉接層只改裝置名稱的解析，不碰運算本身，開銷在量測誤差內（0%）。
 
