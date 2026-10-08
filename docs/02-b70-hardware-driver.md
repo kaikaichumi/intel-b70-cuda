@@ -1,82 +1,84 @@
-# 02 B70 硬體與驅動，以及 CUDA 概念的對應
+English | [繁體中文](02-b70-hardware-driver.zh-TW.md)
 
-標記：**〔實測〕** 是用 `toolchain/probe/ze_probe.c`（Level Zero API）在 B70 上查到的；
-**〔文件〕** 是 Intel 公開資料的說法，還沒在這張卡上驗證。
+# 02 B70 hardware and driver, and how CUDA concepts map onto it
 
-## 驅動堆疊
+Markers: **[measured]** means queried on the B70 with `toolchain/probe/ze_probe.c` (Level Zero API);
+**[docs]** means taken from Intel's public documentation and not yet verified on this card.
+
+## Driver stack
 
 ```
-CUDA 原始碼 ──b70cc/clang──▶ SPIR-V 1.5
+CUDA source ──b70cc/clang──▶ SPIR-V 1.5
                                │
-                     Level Zero loader 1.28（API 1.14）
+                     Level Zero loader 1.28 (API 1.14)
                                │
-              Intel compute-runtime（NEO）26.05 ── IGC 2.28：SPIR-V → Xe2 指令
+              Intel compute-runtime (NEO) 26.05 ── IGC 2.28: SPIR-V → Xe2 instructions
                                │
-                     Linux kernel 7.0 的 xe 驅動
+                     Linux kernel 7.0 xe driver
                                │
-                      Arc Pro B70（BMG-G31）
+                      Arc Pro B70 (BMG-G31)
 ```
 
-| 層 | 版本〔實測〕 | 角色 |
+| Layer | Version [measured] | Role |
 |---|---|---|
-| kernel 驅動 | `xe`（Linux 7.0） | 記憶體管理、排程、韌體介面 |
-| compute-runtime | 26.05.37020.3（Level Zero driver 0x103909c） | 實作 Level Zero 與 OpenCL |
-| IGC | 2.28.4 | 把 SPIR-V 編成 Xe2 機器碼（執行時 JIT） |
-| Level Zero loader | 1.28.2，API 1.14 | 應用程式呼叫的 API 入口 |
+| Kernel driver | `xe` (Linux 7.0) | Memory management, scheduling, firmware interface |
+| compute-runtime | 26.05.37020.3 (Level Zero driver 0x103909c) | Implements Level Zero and OpenCL |
+| IGC | 2.28.4 | Compiles SPIR-V to Xe2 machine code (JIT at run time) |
+| Level Zero loader | 1.28.2, API 1.14 | The API entry point applications call |
 
-## 硬體規格〔實測〕
+## Hardware specifications [measured]
 
-| 項目 | 數值 |
+| Item | Value |
 |---|---|
-| 裝置 ID／IP 版本 | 0xe223／0x5008000（Xe2） |
-| 時脈 | 2800 MHz |
-| 結構 | 8 slice × 4 Xe-core × 8 EU × 8 執行緒 = **32 Xe-core、256 EU、2048 條硬體執行緒** |
-| EU 實體 SIMD 寬度 | 16 |
-| sub-group 寬度 | **16、32** |
-| work-group 上限 | 1024（各維度都 1024） |
-| group 數量上限 | 每個維度 2³²−1 |
-| 共享記憶體（SLM） | 每個 work-group 最多 **128 KiB** |
-| 快取 | 24 MiB（driver 回報的最後一層快取） |
-| 記憶體 | 可配置 30.3 GiB；單次配置上限 30.3 GiB |
+| Device ID / IP version | 0xe223 / 0x5008000 (Xe2) |
+| Clock | 2800 MHz |
+| Structure | 8 slices x 4 Xe-cores x 8 EUs x 8 threads = **32 Xe-cores, 256 EUs, 2048 hardware threads** |
+| EU physical SIMD width | 16 |
+| sub-group widths | **16, 32** |
+| work-group limit | 1024 (1024 in each dimension) |
+| group count limit | 2³²−1 per dimension |
+| Shared memory (SLM) | Up to **128 KiB** per work-group |
+| Cache | 24 MiB (last-level cache as reported by the driver) |
+| Memory | 30.3 GiB allocatable; single-allocation limit 30.3 GiB |
 | SPIR-V | 1.5 |
-| 模組功能 | fp16、fp64、int64 atomics、dp4a |
-| float 原子運算 | fp32、fp64：global／local 的 add、min/max **都是硬體原生**；fp16 只有 load/store、min/max |
-| kernel 參數上限 | 2048 bytes |
-| printf 緩衝 | 4 MiB |
-| 命令佇列 | 群組 0：compute + copy + **cooperative**，1 個引擎；群組 1：copy，1 個引擎 |
-| USM | host／device／shared（單裝置）都可讀寫和原子運算；**不支援 system 配置**（一般 `malloc` 的記憶體不能直接給 GPU 用） |
-| 計時器解析度 | 52 ns |
+| Module capabilities | fp16, fp64, int64 atomics, dp4a |
+| float atomics | fp32, fp64: global/local add and min/max **are all native in hardware**; fp16 has only load/store and min/max |
+| Kernel argument limit | 2048 bytes |
+| printf buffer | 4 MiB |
+| Command queues | Group 0: compute + copy + **cooperative**, 1 engine; group 1: copy, 1 engine |
+| USM | host/device/shared (single device) all support read/write and atomics; **system allocations are not supported** (memory from plain `malloc` cannot be handed to the GPU directly) |
+| Timer resolution | 52 ns |
 
-## 實測效能基準（SYCL／icpx 2026.0，`bench/micro_sycl.cpp`）
+## Measured performance baselines (SYCL/icpx 2026.0, `bench/micro_sycl.cpp`)
 
-| 項目 | 結果 | 說明 |
+| Item | Result | Notes |
 |---|---|---|
-| 記憶體頻寬（STREAM copy／scale／add／triad） | **527～534 GB/s** | 約為 256-bit GDDR6 理論值（~608 GB/s）的 87% |
-| kernel 啟動延遲（連續送 2000 個空 kernel） | 2.2～2.5 µs／個 | in-order queue，含主機端開銷 |
-| float 原子加法（1024 個位置互搶） | 6.7 G ops/s | |
+| Memory bandwidth (STREAM copy/scale/add/triad) | **527-534 GB/s** | About 87% of the theoretical 256-bit GDDR6 figure (~608 GB/s) |
+| Kernel launch latency (2000 empty kernels submitted back to back) | 2.2-2.5 µs each | in-order queue, including host-side overhead |
+| float atomic add (1024 locations under contention) | 6.7 G ops/s | |
 
-**量頻寬一定要用不可壓縮的資料**：Xe2 會壓縮顯示記憶體。陣列全填 0 時，量到的「頻寬」是
-898～1318 GB/s，遠超 GDDR6 的物理上限。改填雜湊亂數後才是上表的數字。
-任何在 B70 上的記憶體效能測試都要注意這點。
+**Bandwidth must be measured with incompressible data**: Xe2 compresses VRAM contents. With arrays filled entirely with zeros, the measured "bandwidth" is
+898-1318 GB/s, far beyond the physical limit of GDDR6. Only after filling them with hashed random values do you get the numbers in the table above.
+Keep this in mind for any memory performance test on the B70.
 
-## CUDA 概念對應
+## CUDA concept mapping
 
-| CUDA | B70／Xe2 | 備註 |
+| CUDA | B70/Xe2 | Notes |
 |---|---|---|
-| SM（streaming multiprocessor） | Xe-core（32 個） | 每個 Xe-core 8 個 EU，每個 EU 8 條硬體執行緒 |
-| warp（32 執行緒） | sub-group 32 | 硬體 SIMD 是 16，SIMD32 由編譯器用兩組 SIMD16 組成。`warpSize` 固定為 32 |
-| thread block | work-group | 上限同為 1024 |
-| grid | ND-range | 維度上限比 CUDA 寬（CUDA 的 y／z 只到 65535） |
-| `__shared__` | SLM | 最多 128 KiB，比多數 NVIDIA 消費級卡（約 100 KB）大 |
-| warp shuffle／vote（`__shfl_*`、`__ballot`） | sub-group 運算 | chipStar 目前只支援非 `_sync` 版本 → **M5 要補** |
-| `atomicAdd(float/double)` | 原生 float atomic | chipStar 預設用 CAS 迴圈模擬 → **B70 可以改走原生指令（M3 效能項目）** |
-| `atomicAdd(__half)` | 只有 CAS 模擬 | 硬體不支援 fp16 原子加法 |
-| `__dp4a` | dp4a | 硬體支援 |
-| tensor core（`wmma`、`mma.sync`） | XMX（DPAS） | DPAS 要求 sub-group 16〔先前的 XMX 實驗〕，跟 warp 32 的資料排列不同 → 不能逐條對應，要另外設計（M5） |
-| cooperative launch、grid sync | Level Zero cooperative kernel | compute 佇列支援 → cooperative groups 有機會做（chipStar 目前沒有） |
-| stream | command list／queue | 只有 1 個 compute 引擎 + 1 個 copy 引擎，多個 stream 的 kernel 不會真的同時跑 |
-| `cudaMemcpyAsync` | copy 引擎 | 有 1 個獨立 copy 引擎，可以跟計算重疊 |
-| unified memory（`cudaMallocManaged`） | shared USM | 支援；但不支援 system 配置，所以沒有 HMM 那種「任何指標都能用」 |
-| kernel 參數（CUDA 上限 4 KB，新版可到 32 KB） | 2048 bytes | 超過時 chipStar 會把參數搬到額外的緩衝區 |
-| `printf` | 有，4 MiB 緩衝 | |
-| `clock64()` | 計時器 | 解析度 52 ns |
+| SM (streaming multiprocessor) | Xe-core (32 of them) | 8 EUs per Xe-core, 8 hardware threads per EU |
+| warp (32 threads) | sub-group 32 | Hardware SIMD is 16; SIMD32 is assembled by the compiler from two SIMD16 groups. `warpSize` is fixed at 32 |
+| thread block | work-group | Same limit of 1024 |
+| grid | ND-range | Dimension limits are wider than CUDA's (CUDA's y/z only go to 65535) |
+| `__shared__` | SLM | Up to 128 KiB, larger than most NVIDIA consumer cards (about 100 KB) |
+| warp shuffle/vote (`__shfl_*`, `__ballot`) | sub-group operations | chipStar currently supports only the non-`_sync` versions → **to be filled in for M5** |
+| `atomicAdd(float/double)` | Native float atomics | chipStar emulates with a CAS loop by default → **the B70 can switch to the native instruction (M3 performance item)** |
+| `atomicAdd(__half)` | CAS emulation only | Hardware has no fp16 atomic add |
+| `__dp4a` | dp4a | Supported in hardware |
+| tensor core (`wmma`, `mma.sync`) | XMX (DPAS) | DPAS requires sub-group 16 [earlier XMX experiments], and the data layout differs from warp 32 → no one-to-one mapping, needs a separate design (M5) |
+| cooperative launch, grid sync | Level Zero cooperative kernel | Supported on the compute queue → cooperative groups are feasible (chipStar does not have them yet) |
+| stream | command list/queue | Only 1 compute engine + 1 copy engine, so kernels on multiple streams do not truly run concurrently |
+| `cudaMemcpyAsync` | copy engine | There is 1 independent copy engine that can overlap with compute |
+| unified memory (`cudaMallocManaged`) | shared USM | Supported; but system allocations are not, so there is no HMM-style "any pointer works" |
+| Kernel arguments (CUDA limit 4 KB, 32 KB in newer versions) | 2048 bytes | When exceeded, chipStar moves the arguments into an extra buffer |
+| `printf` | Available, 4 MiB buffer | |
+| `clock64()` | Timer | 52 ns resolution |

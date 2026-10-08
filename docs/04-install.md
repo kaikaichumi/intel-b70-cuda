@@ -1,97 +1,99 @@
-# 04 從零安裝與日常使用
+English | [繁體中文](04-install.zh-TW.md)
 
-一台裝了 Arc Pro B70（或其他用 `xe` 驅動的 Intel 顯卡）的 Ubuntu 主機，從乾淨系統到能跑 CUDA 風格的程式，要做的事全部在這裡。
-兩層可以分開裝：只跑 Python／PyTorch 的 AI 工具，裝 PyTorch 層就夠；要編 `.cu` 原始碼（含 PyTorch 的 CUDA 擴充套件）才需要工具鏈。
+# 04 Installing from scratch and everyday use
 
-## 主機需求
+Everything needed to take an Ubuntu host with an Arc Pro B70 (or another Intel GPU using the `xe` driver) from a clean system to running CUDA-style programs is here.
+The two layers can be installed separately: to run Python/PyTorch AI tools only, the PyTorch layer is enough; the toolchain is only needed to compile `.cu` source code (including PyTorch CUDA extensions).
 
-| | 需求 | 說明 |
+## Host requirements
+
+| | Requirement | Notes |
 |---|---|---|
-| OS | Ubuntu 24.04 以上，kernel 6.8 以上（實測 26.04、kernel 7.0） | 顯卡要由 `xe` 驅動接管：`ls /sys/class/drm/renderD*/device/driver` 看得到 `xe` |
-| Docker | 任何近期版本；使用者在 `docker` 群組 | 所有東西都在容器裡跑，主機不裝 oneAPI、不裝編譯器、不碰系統 Python |
-| 硬碟 | PyTorch 層約 20 GB（映像檔＋模型快取）；工具鏈另外約 10 GB | 都可以放大硬碟（`B70_DATA`） |
-| 網路 | 第一次要下載映像檔與 chipStar 原始碼（數 GB） | 之後離線可用 |
+| OS | Ubuntu 24.04 or later, kernel 6.8 or later (tested on 26.04, kernel 7.0) | The GPU must be bound to the `xe` driver: `ls /sys/class/drm/renderD*/device/driver` shows `xe` |
+| Docker | Any recent version; the user is in the `docker` group | Everything runs inside containers; the host gets no oneAPI, no compiler, and the system Python is left untouched |
+| Disk | About 20 GB for the PyTorch layer (image + model cache); about another 10 GB for the toolchain | Both can live on a large disk (`B70_DATA`) |
+| Network | The first run downloads the images and the chipStar source code (several GB) | Works offline afterwards |
 
-主機上**不需要**裝 Intel 的 compute runtime 或 Level Zero，容器映像檔自帶；只需要 kernel 的 `xe` 驅動（Ubuntu 24.04 以後內建）。
+The host does **not** need Intel's compute runtime or Level Zero installed; the container images bring their own. Only the kernel's `xe` driver is required (built into Ubuntu 24.04 and later).
 
-## 安裝
+## Installation
 
 ```bash
-git clone <這個 repo> ~/b70-cuda
+git clone https://github.com/kaikaichumi/intel-b70-cuda ~/b70-cuda
 mkdir -p ~/.local/bin
 ln -s ~/b70-cuda/pytorch-layer/b70 ~/.local/bin/b70
 ln -s ~/b70-cuda/toolchain/b70cuda ~/.local/bin/b70cuda
-# 確認 ~/.local/bin 在 PATH 裡（Ubuntu 預設登入 shell 會自動加）
+# make sure ~/.local/bin is in PATH (Ubuntu's default login shell adds it)
 
-# 選擇性：資料和快取放大硬碟
+# optional: keep data and caches on a big disk
 mkdir -p ~/.config/b70
 echo 'B70_DATA=/mnt/bigdisk/b70' >> ~/.config/b70/config
 ```
 
-### PyTorch 層（跑 AI 工具）
+### PyTorch layer (running AI tools)
 
 ```bash
-b70 build          # 建 b70-ai 映像檔：以 vllm/vllm-openai-xpu 的 torch 2.13+xpu 為底，加上轉接層與常用套件（約 10 分鐘）
-b70 test           # 自我測試：15 項，vLLM 開著也能跑
+b70 build          # build the b70-ai image: torch 2.13+xpu from vllm/vllm-openai-xpu plus the compatibility layer and common packages (~10 min)
+b70 test           # self-tests: 15 checks, runs even while vLLM is up
 ```
 
-### CUDA 工具鏈（編 .cu 原始碼、PyTorch CUDA 擴充）
+### CUDA toolchain (compiling .cu source code and PyTorch CUDA extensions)
 
 ```bash
-b70cuda setup      # 下載 chipStar 補丁版 LLVM 22 與 chipStar 原始碼（約 5 GB，直接串流到 $B70_DATA/cuda）
-b70cuda build      # 建開發映像檔、套用 toolchain/patches/、編譯安裝 chipStar、裝 rocPRIM／hipCUB（6 核心約 10 分鐘）
-b70cuda test       # 驗收測試：13 支程式、76 項檢查
+b70cuda setup      # download chipStar's patched LLVM 22 and the chipStar source (~5 GB, streamed straight into $B70_DATA/cuda)
+b70cuda build      # build the dev image, apply toolchain/patches/, build and install chipStar, install rocPRIM/hipCUB (~10 min on 6 cores)
+b70cuda test       # acceptance tests: 13 programs, 76 checks
 ```
 
-`b70 install` 編 CUDA 擴充套件時用的就是這套安裝在 `$B70_DATA/cuda/install` 的工具鏈，不必重建 b70-ai。
-一共四個指令、約半小時，之後更新 repo 只要重跑 `b70 build`（工具鏈補丁有變才要 `b70cuda build`）。
+When `b70 install` compiles CUDA extensions it uses this same toolchain installed in `$B70_DATA/cuda/install`, so b70-ai does not need to be rebuilt.
+Four commands in total, about half an hour; after updating the repo later, only `b70 build` needs to be rerun (`b70cuda build` only when the toolchain patches have changed).
 
-## 日常使用
+## Everyday use
 
-### 跑現成的 AI 專案
+### Running an existing AI project
 
 ```bash
-cd ~/some-project                       # 任何寫給 NVIDIA 的 repo
-b70 install -r requirements.txt         # pip install 進這個資料夾的 .b70venv；CUDA 專用套件自動濾掉或換成 Triton 版
-b70 python app.py                       # 程式裡的 "cuda" 自動變成 B70
-b70 shell                               # 要手動操作就進容器 shell，路徑跟主機一樣
+cd ~/some-project                       # any repo written for NVIDIA
+b70 install -r requirements.txt         # pip install into this folder's .b70venv; CUDA-only packages filtered out or replaced
+b70 python app.py                       # "cuda" in the program becomes the B70
+b70 shell                               # a shell inside the container; paths are the same as on the host
 ```
 
-帶 `.cu` 原始碼的套件（例如 `pip install mamba-ssm`）也是 `b70 install`，它會自動改用 `b70cc` 編譯，第一次會久一點。
+Packages that ship `.cu` source code (e.g. `pip install mamba-ssm`) also go through `b70 install`; it automatically switches to `b70cc` for compilation, and the first time takes a bit longer.
 
-### 編 CUDA 程式
+### Compiling CUDA programs
 
 ```bash
-b70cuda cc -O3 main.cu -o main          # 跟 nvcc 一樣的用法（--use_fast_math、-arch=sm_xx 都接受）
-b70cuda run ./main                      # 在 B70 上執行
-b70cuda shell                           # 進開發環境，裡面直接用 b70cc；CMake 專案加 -DCMAKE_CUDA_COMPILER=$(which b70cc)
+b70cuda cc -O3 main.cu -o main          # same usage as nvcc (--use_fast_math, -arch=sm_xx are accepted)
+b70cuda run ./main                      # run on the B70
+b70cuda shell                           # dev environment with b70cc on PATH; for CMake add -DCMAKE_CUDA_COMPILER=$(which b70cc)
 ```
 
-第一次執行某支程式時 IGC 要把 SPIR-V 編成機器碼（約 0.1 秒到幾秒），結果快取在 `$B70_DATA/cache`，之後不用再等。
+The first time a program runs, IGC has to compile the SPIR-V into machine code (about 0.1 seconds to a few seconds); the result is cached in `$B70_DATA/cache`, so there is no wait afterwards.
 
-### 跟 vLLM 這類常駐服務共用顯卡
+### Sharing the GPU with long-running services such as vLLM
 
-B70 只有一張卡；如果同時跑著 vLLM，顯存會被它佔住。`b70 gpu` 看誰在用、剩多少；`b70 gpu free`／`b70 gpu llm` 停掉與重開 vLLM
-（容器名稱用 `B70_VLLM` 設定）。小模型和自我測試不必停。
+The B70 is a single card; if vLLM is running at the same time, it holds the VRAM. `b70 gpu` shows who is using it and how much is left; `b70 gpu free`/`b70 gpu llm` stop and restart vLLM
+(the container name is set with `B70_VLLM`). Small models and the self-tests do not require stopping it.
 
-## 會遇到的事
+## Things you will run into
 
-| 現象 | 原因／處理 |
+| Symptom | Cause/fix |
 |---|---|
-| `b70 install` 把某個套件丟掉了 | 它只有 CUDA 版（xformers、flash-attn、cupy…）。diffusers／ComfyUI 等會自動改用 SDPA；清單在 `pytorch-layer/py/b70cuda/pipfilter.py` |
-| 程式說 `Torch not compiled with CUDA enabled` | 轉接層沒啟動。確認是用 `b70 python` 跑的；可用 `B70_CUDA_SKIP`／`B70_CUDA=0` 排除是不是某一段轉接造成問題 |
-| 工具鏈更新後擴充套件行為沒變 | pip 用了快取裡舊的 wheel：`b70 install --no-build-isolation --no-deps --force-reinstall --no-cache-dir <套件>` |
-| `.cu` 用到 `cooperative_groups`、`mma`／`wmma`、inline PTX、cuBLAS／cuDNN | chipStar 不支援，目前只能改原始碼（見 [03 路線圖](03-roadmap.md) 的 M5） |
-| 第一次跑某個 kernel 很慢 | IGC 即時編譯，第二次起走快取 |
+| `b70 install` dropped a package | It only exists as a CUDA build (xformers, flash-attn, cupy, ...). diffusers, ComfyUI and the like automatically fall back to SDPA; the list is in `pytorch-layer/py/b70cuda/pipfilter.py` |
+| The program says `Torch not compiled with CUDA enabled` | The compatibility layer is not active. Make sure it was run with `b70 python`; use `B70_CUDA_SKIP`/`B70_CUDA=0` to rule out whether a particular part of the layer is causing the problem |
+| Extension behavior unchanged after a toolchain update | pip used an old wheel from its cache: `b70 install --no-build-isolation --no-deps --force-reinstall --no-cache-dir <package>` |
+| The `.cu` uses `cooperative_groups`, `mma`/`wmma`, inline PTX, cuBLAS/cuDNN | Not supported by chipStar; for now the only option is to change the source code (see M5 in the [03 roadmap](03-roadmap.md)) |
+| A kernel is very slow the first time it runs | IGC just-in-time compilation; from the second run on it comes from the cache |
 
-## 檔案都放在哪
+## Where everything lives
 
-| | 位置 |
+| | Location |
 |---|---|
-| 工具本身 | `~/b70-cuda`（兩個指令是符號連結） |
-| 模型、pip、kernel 快取 | `$B70_DATA`（預設 `~/.local/share/b70`） |
-| chipStar 原始碼、建置與安裝 | `$B70_DATA/cuda` |
-| 每個專案自己的 venv | 專案資料夾裡的 `.b70venv` |
-| 每台機器的設定 | `~/.config/b70/config`（`B70_DATA`、`B70_MOUNTS`、`B70_GPU_PCI`、`B70_VLLM`） |
+| The tools themselves | `~/b70-cuda` (the two commands are symbolic links) |
+| Models, pip and kernel caches | `$B70_DATA` (default `~/.local/share/b70`) |
+| chipStar source code, build and install | `$B70_DATA/cuda` |
+| Each project's own venv | `.b70venv` inside the project folder |
+| Per-machine settings | `~/.config/b70/config` (`B70_DATA`, `B70_MOUNTS`, `B70_GPU_PCI`, `B70_VLLM`) |
 
-容器以你的帳號執行，產生的檔案擁有者是你；家目錄、`$B70_DATA` 和目前資料夾在容器裡路徑相同。
+Containers run as your own account, so the files they create are owned by you; your home directory, `$B70_DATA` and the current folder have the same paths inside the container.
