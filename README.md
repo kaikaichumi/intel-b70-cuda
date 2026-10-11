@@ -23,6 +23,34 @@ that compiles `.cu` code (including PyTorch CUDA extensions) for the B70 through
 
 Rule of thumb: if the project has an `xpu` build, use that. If it only has a CUDA build and the source is available, this project makes it run.
 
+## How much does it cost in performance?
+
+Measured on the B70 with the same program built both ways (details, method and the slow cases in [docs/03-roadmap.md](docs/03-roadmap.md), sections 3 and 4; scripts in `bench/`).
+
+**CUDA toolchain** (`.cu` through `b70cc`) versus the same kernels written natively in SYCL (`icpx`):
+
+| | CUDA through `b70cc` | Native SYCL | |
+|---|---|---|---|
+| Memory bandwidth, copy / scale / add / triad | 518 / 520 / 533 / 531 GB/s | 529 / 529 / 533 / 531 GB/s | 0 to 2% |
+| Kernel launch latency | 1.88 µs | 2.32 µs | CUDA build 19% faster |
+| Float atomics | 7.09 G ops/s | 6.72 G ops/s | CUDA build 5% faster |
+| 32 HeCBench kernels, self-reported kernel time, geometric mean | 0.89× | 1.00× | CUDA build 11% slower |
+
+Bandwidth-bound code, launches and atomics lose nothing. The gap is concentrated in a few stencil / shared-memory kernels (fdtd3d, bilateral, laplace, jacobi: 30 to 40% slower); most of the rest are within 5%.
+
+**PyTorch layer** (`"cuda"` through the compatibility layer) versus plain `"xpu"`:
+
+| | Through the layer | Native `xpu` |
+|---|---|---|
+| matmul 4096² bf16 | 0.83 ms | 1.02 ms |
+| SDPA, 4k tokens, 16 heads | 0.83 ms | 0.83 ms |
+| conv2d 8×64×256×256 | 0.58 ms | 0.58 ms |
+| TransformerEncoderLayer forward | 0.99 ms | 0.97 ms |
+| 1000 tiny ops (dispatch overhead) | 9.99 ms | 10.45 ms |
+| `.to(device)` | 0.017 ms | 0.015 ms |
+
+All within measurement noise (the matmul rows are the same oneDNN kernel at a different clock): the layer only changes how the name `"cuda"` is resolved, the computation never passes through it, so the overhead is zero.
+
 ## How to use it in three minutes
 
 ```bash

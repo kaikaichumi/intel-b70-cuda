@@ -22,6 +22,34 @@
 
 判斷原則：專案有 `xpu` 版就用它；只有 CUDA 版但有原始碼，這個專案讓它跑起來。
 
+## 效能會損失多少？
+
+在 B70 上把同一支程式用兩種方式各編一次實測（細節、方法與慢的案例見 [docs/03-roadmap.md](docs/03-roadmap.zh-TW.md) 第 3、4 節；腳本在 `bench/`）。
+
+**CUDA 工具鏈**（`.cu` 經 `b70cc`）對同樣 kernel 的 SYCL 原生版（`icpx`）：
+
+| | CUDA 經 `b70cc` | SYCL 原生 | |
+|---|---|---|---|
+| 記憶體頻寬 copy／scale／add／triad | 518／520／533／531 GB/s | 529／529／533／531 GB/s | 0～2% |
+| kernel 啟動延遲 | 1.88 µs | 2.32 µs | CUDA 版快 19% |
+| float atomic | 7.09 G ops/s | 6.72 G ops/s | CUDA 版快 5% |
+| HeCBench 32 個 kernel，程式自報的 kernel 時間，幾何平均 | 0.89× | 1.00× | CUDA 版慢 11% |
+
+頻寬類、啟動、atomic 沒有損失；差距集中在幾個 stencil／共享記憶體的 kernel（fdtd3d、bilateral、laplace、jacobi 慢 30～40%），其他大多在 5% 以內。
+
+**PyTorch 層**（`"cuda"` 經轉接層）對直接寫 `"xpu"`：
+
+| | 經轉接層 | 原生 `xpu` |
+|---|---|---|
+| matmul 4096² bf16 | 0.83 ms | 1.02 ms |
+| SDPA 4k token、16 heads | 0.83 ms | 0.83 ms |
+| conv2d 8×64×256×256 | 0.58 ms | 0.58 ms |
+| TransformerEncoderLayer 前向 | 0.99 ms | 0.97 ms |
+| 1000 個小運算（dispatch 開銷） | 9.99 ms | 10.45 ms |
+| `.to(device)` | 0.017 ms | 0.015 ms |
+
+全部在量測抖動內（matmul 那列是同一個 oneDNN kernel、不同時脈下的兩次結果）：轉接層只改 `"cuda"` 這個名字怎麼解析，運算本身不經過它，所以開銷為零。
+
 ## 三分鐘看懂怎麼用
 
 ```bash
